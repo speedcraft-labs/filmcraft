@@ -59,6 +59,7 @@ pub(crate) fn window() -> &'static [f32; 512] {
 
 /// The matrixing coefficients `N[i][k] = cos((16 + i)(2k + 1)π / 64)` of the synthesis subband
 /// filter (§2.4.3.2, Figure A.2), `i` in `0..64`, `k` in `0..32`.
+#[cfg(test)]
 pub(crate) fn matrix() -> &'static [[f32; 32]; 64] {
     static N: OnceLock<[[f32; 32]; 64]> = OnceLock::new();
     N.get_or_init(|| {

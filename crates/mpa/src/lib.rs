@@ -15,6 +15,7 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
+mod dct32;
 mod tables;
 
 use filmcraft_bitstream::BitReader;
@@ -170,6 +171,7 @@ type Subbands = [[[f32; tables::SUBBANDS]; 36]; 2];
 pub struct Decoder {
     /// The synthesis filter's `V` vector per channel (§2.4.3.2, Figure A.2).
     v: [[f32; 1024]; 2],
+    v_offset: [usize; 2],
     sb: Box<Subbands>,
 }
 
@@ -181,12 +183,13 @@ impl Default for Decoder {
 
 impl Decoder {
     pub fn new() -> Self {
-        Self { v: [[0.0; 1024]; 2], sb: Box::new([[[0.0; 32]; 36]; 2]) }
+        Self { v: [[0.0; 1024]; 2], v_offset: [0; 2], sb: Box::new([[[0.0; 32]; 36]; 2]) }
     }
 
     /// Forget the filter history.
     pub fn reset(&mut self) {
         self.v = [[0.0; 1024]; 2];
+        self.v_offset = [0; 2];
     }
 
     /// Decode the frame at the start of `frame` (which may run on into the next frames; only
@@ -216,12 +219,11 @@ impl Decoder {
             36
         };
         let window = tables::window();
-        let matrix = tables::matrix();
         let mut channels = vec![vec![0f32; slots * 32]; nch];
         for (ch, out) in channels.iter_mut().enumerate() {
             let (Some(v), Some(sb)) = (self.v.get_mut(ch), self.sb.get(ch)) else { continue };
             for (slot, o) in sb.iter().take(slots).zip(out.as_chunks_mut::<32>().0) {
-                synthesize(v, matrix, window, slot, o);
+                synthesize(v, &mut self.v_offset[ch], window, slot, o);
             }
         }
         Ok(Frame { header, channels })
@@ -393,15 +395,22 @@ fn layer2(r: &mut BitReader, h: &Header, out: &mut Subbands) -> Result<()> {
 
 /// The synthesis subband filter (§2.4.3.2, Figure A.2) for one time slot: 32 subband samples in,
 /// 32 PCM samples out.
-fn synthesize(v: &mut [f32; 1024], n: &[[f32; 32]; 64], d: &[f32; 512], s: &[f32; 32], out: &mut [f32; 32]) {
-    v.copy_within(0..960, 64);
-    for (vi, row) in v.iter_mut().zip(n.iter()) {
-        *vi = row.iter().zip(s.iter()).map(|(a, b)| a * b).sum();
+fn synthesize(v: &mut [f32; 1024], offset: &mut usize, d: &[f32; 512], s: &[f32; 32], out: &mut [f32; 32]) {
+    *offset = offset.wrapping_sub(64) & 1023;
+    let transformed = dct32::dct32(&s.map(f64::from));
+    for index in 0..16 {
+        v[*offset + index] = transformed[16 + index] as f32;
+        v[*offset + 32 + index] = -transformed[16 - index] as f32;
+        v[*offset + 48 + index] = -transformed[index] as f32;
+    }
+    v[*offset + 16] = 0.0;
+    for index in 1..16 {
+        v[*offset + 16 + index] = -transformed[32 - index] as f32;
     }
     for (j, o) in out.iter_mut().enumerate() {
         let mut acc = 0f32;
         for i in 0..8 {
-            acc += v[i * 128 + j] * d[i * 64 + j] + v[i * 128 + 96 + j] * d[i * 64 + 32 + j];
+            acc += v[(*offset + i * 128 + j) & 1023] * d[i * 64 + j] + v[(*offset + i * 128 + 96 + j) & 1023] * d[i * 64 + 32 + j];
         }
         *o = acc;
     }
@@ -409,3 +418,6 @@ fn synthesize(v: &mut [f32; 1024], n: &[[f32; 32]; 64], d: &[f32; 512], s: &[f32
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod synthesis_tests;

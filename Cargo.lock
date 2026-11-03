@@ -2344,6 +2344,7 @@ dependencies = [
 name = "filmcraft-mpa"
 version = "0.17.0"
 dependencies = [
+ "allocation-counter",
  "filmcraft-bitstream",
  "filmcraft-testkit",
  "thiserror 2.0.21",

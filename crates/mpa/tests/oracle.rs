@@ -226,6 +226,37 @@ fn frames(data: &[u8]) -> Vec<&[u8]> {
     out
 }
 
+#[test]
+#[ignore = "release-mode decode benchmark; generate the oracle fixtures first"]
+fn benchmark_largest_fixture() {
+    let fixture = std::fs::read_dir(filmcraft_testkit::fixtures_dir("mpa"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "mp1" || extension == "mp2"))
+        .max_by_key(|path| std::fs::metadata(path).unwrap().len())
+        .expect("run the oracle tests to generate fixtures");
+    let data = std::fs::read(&fixture).unwrap();
+    let frames = frames(&data);
+    assert!(!frames.is_empty());
+    let mut decoder = Decoder::new();
+    for frame in &frames {
+        std::hint::black_box(decoder.decode(frame).unwrap());
+    }
+    let mut timings = [0.0; 9];
+    for timing in &mut timings {
+        let start = std::time::Instant::now();
+        for _ in 0..100 {
+            decoder.reset();
+            for frame in &frames {
+                std::hint::black_box(decoder.decode(std::hint::black_box(frame)).unwrap());
+            }
+        }
+        *timing = start.elapsed().as_secs_f64() / 100.0;
+    }
+    timings.sort_by(f64::total_cmp);
+    println!("{}: {} bytes, {} frames, median decode {:.3} ms", fixture.display(), data.len(), frames.len(), timings[4] * 1000.0);
+}
+
 /// ffmpeg's decode of `file`, interleaved f32.
 fn ffmpeg_decode(ff: &Path, file: &Path) -> Vec<f32> {
     let o = Command::new(ff).args(["-v", "error", "-f", "mp3", "-i"]).arg(file).args(["-f", "f32le", "-"]).output().unwrap();

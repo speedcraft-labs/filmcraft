@@ -48,7 +48,7 @@ fn color(frame: &JsValue, fallback: ColorInfo) -> Option<ColorInfo> {
         Some(false) => Range::Limited,
         None => fallback.range,
     };
-    Some(ColorInfo { matrix, transfer, primaries, range })
+    Some(ColorInfo { matrix, transfer, primaries, range, ..fallback })
 }
 
 fn plane(raw: &js_sys::Uint8Array, layout: &JsValue, width: u32, height: u32) -> Result<Vec<u8>, &'static str> {

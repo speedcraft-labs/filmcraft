@@ -25,11 +25,29 @@ fn colors(ff: &std::path::Path, name: &str, codec: &[&str]) -> Option<(ColorInfo
 }
 
 #[test]
+fn decoded_frames_keep_signalled_chroma_locations() {
+    use filmcraft_color::ChromaSiting;
+    let ff = filmcraft_testkit::require_ffmpeg!();
+    for (name, codec, expected) in [
+        ("siting_center_h264.mp4", vec!["-c:v", "libx264", "-pix_fmt", "yuv420p", "-x264-params", "chromaloc=1"], ChromaSiting::Center),
+        (
+            "siting_topleft_hevc.mp4",
+            vec!["-c:v", "libx265", "-pix_fmt", "yuv420p", "-tag:v", "hvc1", "-x265-params", "log-level=error:chromaloc=2"],
+            ChromaSiting::TopLeft,
+        ),
+    ] {
+        let Some((stream, frame)) = colors(&ff, name, &codec) else { continue };
+        assert_eq!(stream.chroma_siting, expected, "{name}: stream");
+        assert_eq!(frame.chroma_siting, expected, "{name}: frame");
+    }
+}
+
+#[test]
 fn decoded_frames_keep_the_signalled_primaries() {
     let ff = filmcraft_testkit::require_ffmpeg!();
     let x264 = |p: &'static str| ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-x264-params", p];
     let x265 = |p: &'static str, pix: &'static str| ["-c:v", "libx265", "-pix_fmt", pix, "-tag:v", "hvc1", "-x265-params", p];
-    let sdr2020 = ColorInfo { matrix: Matrix::Bt709, transfer: Transfer::Bt709, primaries: Primaries::Bt2020, range: Range::Limited };
+    let sdr2020 = ColorInfo { matrix: Matrix::Bt709, transfer: Transfer::Bt709, primaries: Primaries::Bt2020, range: Range::Limited, ..ColorInfo::REC709 };
     let cases: [(&str, Vec<&str>, ColorInfo, ColorSpace); 4] = [
         ("prim2020_h264.mp4", x264("colorprim=bt2020:transfer=bt709:colormatrix=bt709").to_vec(), sdr2020, ColorSpace::Rec2020),
         ("prim2020_hevc.mp4", x265("log-level=error:colorprim=bt2020:transfer=bt709:colormatrix=bt709", "yuv420p").to_vec(), sdr2020, ColorSpace::Rec2020),
@@ -44,7 +62,7 @@ fn decoded_frames_keep_the_signalled_primaries() {
         (
             "prim2020_pq_hevc.mp4",
             x265("log-level=error:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc", "yuv420p10le").to_vec(),
-            ColorInfo { matrix: Matrix::Bt2020Ncl, transfer: Transfer::Pq, primaries: Primaries::Bt2020, range: Range::Limited },
+            ColorInfo { matrix: Matrix::Bt2020Ncl, transfer: Transfer::Pq, primaries: Primaries::Bt2020, range: Range::Limited, ..ColorInfo::REC709 },
             ColorSpace::Rec2100Pq,
         ),
     ];

@@ -50,6 +50,7 @@ pub struct FrameStreamInfo {
     /// VP9: transfer and primaries from the container (not in the bitstream).
     transfer: Option<Transfer>,
     primaries: Option<Primaries>,
+    chroma_siting: filmcraft_color::ChromaSiting,
 }
 
 /// The OBUs of a low-overhead AV1 sample: `(type, payload)`, stopping at the first malformed one.
@@ -160,6 +161,7 @@ impl FrameStreamInfo {
                     color: None,
                     transfer: Transfer::from_code(c.transfer_characteristics),
                     primaries: primaries_from_code(c.colour_primaries),
+                    chroma_siting: filmcraft_color::ChromaSiting::from_vp9(c.chroma_subsampling).unwrap_or_default(),
                 }))
             }
             CodecConfig::Av1(c) => Some(Self::from_av1(c, size)),
@@ -177,6 +179,8 @@ impl FrameStreamInfo {
             return Err(CodecError::Decode(format!("sample entry says {}x{}, the sequence header {}x{}", entry_size.0, entry_size.1, size.0, size.1)));
         }
         let cc = &h.color;
+        let mut color = av1_color(size.0, size.1, cc.matrix_coefficients, cc.transfer_characteristics, cc.color_primaries, cc.color_range);
+        color.chroma_siting = filmcraft_color::ChromaSiting::from_av1(cc.chroma_sample_position).unwrap_or_default();
         Ok(Self {
             codec: FrameCodec::Av1,
             profile: h.profile,
@@ -186,9 +190,10 @@ impl FrameStreamInfo {
             size,
             config_obus: c.config_obus.clone(),
             sequence_header: Some(seq.to_vec()),
-            color: Some(av1_color(size.0, size.1, cc.matrix_coefficients, cc.transfer_characteristics, cc.color_primaries, cc.color_range)),
+            color: Some(color),
             transfer: None,
             primaries: None,
+            chroma_siting: color.chroma_siting,
         })
     }
 
@@ -212,6 +217,7 @@ impl FrameStreamInfo {
             color: None,
             transfer: None,
             primaries: None,
+            chroma_siting: Default::default(),
         }
     }
 
@@ -230,7 +236,8 @@ impl FrameStreamInfo {
         match self.codec {
             FrameCodec::Vp9 => {
                 let k = filmcraft_vp9::keyframe_info(sample)?;
-                let color = vp9_color(k.width, k.height, k.color.color_space, k.color.full_range, self.transfer, self.primaries);
+                let mut color = vp9_color(k.width, k.height, k.color.color_space, k.color.full_range, self.transfer, self.primaries);
+                color.chroma_siting = self.chroma_siting;
                 Some(PictureParams {
                     size: (k.width, k.height),
                     bit_depth: k.bit_depth,
@@ -243,7 +250,8 @@ impl FrameStreamInfo {
                 let h = filmcraft_av1::SequenceHeader::parse(seq).ok()?;
                 let cc = &h.color;
                 let size = (h.max_frame_width, h.max_frame_height);
-                let color = av1_color(size.0, size.1, cc.matrix_coefficients, cc.transfer_characteristics, cc.color_primaries, cc.color_range);
+                let mut color = av1_color(size.0, size.1, cc.matrix_coefficients, cc.transfer_characteristics, cc.color_primaries, cc.color_range);
+                color.chroma_siting = filmcraft_color::ChromaSiting::from_av1(cc.chroma_sample_position).unwrap_or_default();
                 Some(PictureParams { size, bit_depth: u32::from(cc.bit_depth), subsampling: (cc.subsampling_x, cc.subsampling_y), color })
             }
         }

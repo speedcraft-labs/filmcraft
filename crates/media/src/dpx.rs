@@ -12,12 +12,16 @@
 //! shown as stored, without a film-log conversion. Y'CbCr is converted with the matrix the
 //! colorimetric field names (BT.709, or BT.601 for the 601 and composite video codes; by picture
 //! size when unspecified), in video range unless the reference low / high data codes span the
-//! whole code range; 4:2:2 chroma is shared by the two pixels of a pair.
+//! whole code range; 4:2:2 chroma is reconstructed bilinearly from co-sited samples.
 //!
 //! Not decoded (an "unsupported" error): run-length encoded elements, 1-bit and floating-point
 //! components, transposed orientations.
 
 use filmcraft_color::{Matrix, Range, normalize_c, normalize_y, ycbcr_to_rgb};
+use filmcraft_frame::{
+    Chroma,
+    chroma::{ChromaFilter, ChromaUpsampler},
+};
 
 use crate::{MediaError, Result, still::Raster};
 
@@ -141,7 +145,7 @@ impl Components {
     }
 
     /// RGBA8 of pixel `x` from the unpacked component values of its scan line (`bits` per value).
-    fn pixel(self, line: &[u16], x: usize, bits: u32) -> [u8; 4] {
+    fn pixel(self, line: &[u16], x: usize, bits: u32, chroma: Option<[u32; 2]>) -> [u8; 4] {
         let max = (1u32 << bits) - 1;
         let to8 = |v: u32| ((v.min(max) * 255 + max / 2) / max) as u8;
         let get = |i: usize| line.get(i).map(|&v| u32::from(v));
@@ -150,18 +154,12 @@ impl Components {
                 Some(i) => get(x * n + i).map_or(0, to8),
                 None => 255,
             }),
-            Components::YCbCr { n, sub, alpha, matrix, range } => {
+            Components::YCbCr { n, alpha, matrix, range, .. } => {
                 let base = x * n;
-                let (cb, cr) = if sub {
-                    let pair = (x & !1) * n;
-                    (get(pair), get(pair + n))
-                } else {
-                    (get(base), get(base + 2))
-                };
-                // a missing Cr (odd width, 4:2:2) is neutral
                 let mid = 1u32 << (bits - 1);
+                let [cb, cr] = chroma.unwrap_or([mid; 2]);
                 let y = normalize_y(get(base + 1).unwrap_or(0), bits, range);
-                let rgb = ycbcr_to_rgb(y, normalize_c(cb.unwrap_or(mid), bits, range), normalize_c(cr.unwrap_or(mid), bits, range), matrix);
+                let rgb = ycbcr_to_rgb(y, normalize_c(cb, bits, range), normalize_c(cr, bits, range), matrix);
                 let c = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
                 let a = if alpha { get(base + n - 1).map_or(0, to8) } else { 255 };
                 [c(rgb[0]), c(rgb[1]), c(rgb[2]), a]
@@ -250,15 +248,38 @@ pub fn decode(name: &str, bytes: &[u8]) -> Result<Raster> {
     let bits = u32::from(bits);
     let mut rgba = vec![0u8; pixels * 4];
     let mut line = Vec::with_capacity(comps);
+    let mut cb = Vec::new();
+    let mut cr = Vec::new();
     for y in 0..h {
         let src = data.get(y * stride..).unwrap_or_default();
         layout.unpack(src, comps, order, &mut line);
+        let chroma = if let Components::YCbCr { n, sub, .. } = components {
+            cb.clear();
+            cr.clear();
+            for column in (0..w).step_by(if sub { 2 } else { 1 }) {
+                cb.push(line.get(column * n).copied().unwrap_or(1 << (bits - 1)));
+                cr.push(line.get(column * n + if sub { n } else { 2 }).copied().unwrap_or(1 << (bits - 1)));
+            }
+            Some(
+                ChromaUpsampler::new(
+                    [&cb, &cr],
+                    (w, 1),
+                    if sub { Chroma::C422 } else { Chroma::C444 },
+                    filmcraft_color::ChromaSiting::Left,
+                    ChromaFilter::Bilinear,
+                )
+                .ok_or_else(|| err(name, "invalid chroma planes"))?,
+            )
+        } else {
+            None
+        };
+        let chroma_row = chroma.as_ref().map(|chroma| chroma.row(0));
         let dy = if flip_y { h - 1 - y } else { y };
         for x in 0..w {
             let dx = if flip_x { w - 1 - x } else { x };
             let o = (dy * w + dx) * 4;
             if let Some(px) = rgba.get_mut(o..o + 4) {
-                px.copy_from_slice(&components.pixel(&line, x, bits));
+                px.copy_from_slice(&components.pixel(&line, x, bits, chroma_row.as_ref().map(|row| row.sample(x))));
             }
         }
     }
@@ -385,7 +406,7 @@ mod tests {
         let mut f = file(true, 4, 1, Element { descriptor: 100, bits: 8, packing: 0 }, 0, &[128, 16, 128, 235, 102, 63, 240, 63]);
         f[ELEMENT + 22] = 6;
         let r = decode("a.dpx", &f).unwrap();
-        assert_eq!(r.rgba, [0, 0, 0, 255, 255, 255, 255, 255, 255, 1, 0, 255, 255, 1, 0, 255]);
+        assert_eq!(r.rgba, [0, 0, 0, 255, 255, 228, 228, 255, 255, 1, 0, 255, 255, 1, 0, 255]);
         assert!(!r.has_alpha);
         // red in BT.601 (colorimetric 7): the 601 code triple, rounded
         let mut f = file(true, 2, 1, Element { descriptor: 100, bits: 8, packing: 0 }, 0, &[90, 81, 240, 81]);
@@ -431,5 +452,14 @@ mod tests {
         f[ELEMENT + 32..ELEMENT + 36].copy_from_slice(&(u32::MAX - 1).to_be_bytes());
         assert!(decode("a.dpx", &file(true, 1, 2, Element { descriptor: 50, bits: 8, packing: 0 }, 0, &[0; 4])).is_err());
         assert!(decode("a.dpx", &f).is_ok());
+    }
+
+    #[test]
+    fn packed_422_chroma_edge_matches_explicit_bilinear_444() {
+        let packed = [80, 128, 128, 128, 180, 128, 128, 128];
+        let expanded = [80, 128, 128, 130, 128, 128, 180, 128, 128, 180, 128, 128];
+        let source = file(true, 4, 1, Element { descriptor: 100, bits: 8, packing: 0 }, 0, &packed);
+        let reference = file(true, 4, 1, Element { descriptor: 102, bits: 8, packing: 0 }, 0, &expanded);
+        assert_eq!(decode("source.dpx", &source).unwrap().rgba, decode("reference.dpx", &reference).unwrap().rgba);
     }
 }

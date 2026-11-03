@@ -200,17 +200,12 @@ fn color_from(entry: &filmcraft_isobmff::SampleEntry, w: u32, h: u32) -> (ColorI
         _ => None,
     };
     let stream = match &entry.codec {
-        CodecConfig::Vp9(v) => Some(ColorCodes {
-            primaries: v.colour_primaries,
-            transfer: v.transfer_characteristics,
-            matrix: v.matrix_coefficients,
-            full_range: Some(v.full_range),
-        }),
         CodecConfig::Apv(a) if a.color_description_present => Some(ColorCodes {
             primaries: a.color_primaries,
             transfer: a.transfer_characteristics,
             matrix: a.matrix_coefficients,
             full_range: Some(a.full_range),
+            chroma_siting: None,
         }),
         CodecConfig::Apv(_) => None,
         codec => crate::stream_color::from_codec_config(codec),

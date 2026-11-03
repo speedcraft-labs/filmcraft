@@ -423,7 +423,7 @@ fn opaque_yuv8_to_srgb_bytes_is_the_linear_picture_in_srgb() {
                             width: w as u32,
                             height: h as u32,
                             data: PixelData::Yuv8 { planes: planes.clone(), chroma, alpha: None },
-                            color: ColorInfo { matrix, transfer, primaries: Primaries::Bt709, range },
+                            color: ColorInfo { matrix, transfer, primaries: Primaries::Bt709, range, ..ColorInfo::REC709 },
                             par: (1, 1),
                             pts: Tick::ZERO,
                         };
@@ -467,7 +467,22 @@ fn yuv8_reference(f: &VideoFrame, decode: Option<&DecodeTable>) -> Vec<f32> {
     let (w, h) = (f.width as usize, f.height as usize);
     let (sx, sy) = chroma.shifts();
     let cw = w.div_ceil(1 << sx);
+    let ch = h.div_ceil(1 << sy);
     let info = f.color;
+    let (phase_x, phase_y) = info.chroma_siting.half_sample_offsets();
+    let sample = |plane: &[u8], x: usize, y: usize| {
+        let coordinate = |position: usize, shift: u32, phase: u32, length: usize| {
+            ((position as f64 - if shift == 0 { 0.0 } else { f64::from(phase) / 2.0 }) / f64::from(1 << shift)).clamp(0.0, (length - 1) as f64)
+        };
+        let horizontal = coordinate(x, sx, phase_x, cw);
+        let vertical = coordinate(y, sy, phase_y, ch);
+        let column = horizontal as usize;
+        let row = vertical as usize;
+        let blend = |row: usize| {
+            f64::from(plane[row * cw + column]) * (1.0 - horizontal.fract()) + f64::from(plane[row * cw + (column + 1).min(cw - 1)]) * horizontal.fract()
+        };
+        (blend(row) * (1.0 - vertical.fract()) + blend((row + 1).min(ch - 1)) * vertical.fract()).round() as u32
+    };
     let q = |v: f32| match decode {
         Some(t) => t.lookup(v),
         None => to_linear(((v.clamp(0.0, 1.0) * 4095.0 + 0.5) as usize) as f32 / 4095.0, info.transfer),
@@ -479,9 +494,8 @@ fn yuv8_reference(f: &VideoFrame, decode: Option<&DecodeTable>) -> Vec<f32> {
     let mut out = Vec::with_capacity(w * h * 4);
     for y in 0..h {
         for x in 0..w {
-            let c = (y >> sy) * cw + (x >> sx);
             let yy = normalize_y(u32::from(planes[0][y * w + x]), 8, info.range);
-            let (u, v) = (normalize_c(u32::from(planes[1][c]), 8, info.range), normalize_c(u32::from(planes[2][c]), 8, info.range));
+            let (u, v) = (normalize_c(sample(&planes[1], x, y), 8, info.range), normalize_c(sample(&planes[2], x, y), 8, info.range));
             let a = alpha.as_ref().map_or(1.0, |al| f32::from(al[y * w + x]) / 255.0);
             out.extend([(0.0 + q(yy + cr_r * v) * a), (0.0 + q(yy - cr_g * v - cb_g * u) * a), (0.0 + q(yy + cb_b * u) * a), (0.0 + a)]);
         }
@@ -527,12 +541,9 @@ fn a_full_size_yuv8_picture_converts_exactly_pixel_by_pixel() {
     }
 }
 
-/// Planes shorter than the picture never make the conversion panic: the pixels whose samples
-/// are there come out as usual (also in a row the plane ends in), the others transparent.
+/// Incomplete pictures are transparent rather than sampling missing interpolation neighbours.
 #[test]
 fn a_yuv8_picture_with_short_planes_converts_without_panicking() {
-    // 8x8 4:2:0 whose planes hold three and a half rows of luma, two of chroma and five of
-    // alpha: rows 0-2 are whole, row 3 has its first four pixels, the rest is transparent
     let f = VideoFrame {
         data: PixelData::Yuv8 {
             planes: [Arc::new(vec![235; 28]), Arc::new(vec![128; 8]), Arc::new(vec![128; 8])],
@@ -544,10 +555,6 @@ fn a_yuv8_picture_with_short_planes_converts_without_panicking() {
     };
     let (_, _, px) = f.to_linear_f32_decimated(1);
     assert_eq!(px.len(), 8 * 8 * 4);
-    let white = |p: &[f32]| p[3] == 1.0 && p[0] > 0.99;
-    let row = |y: usize| &px[y * 32..(y + 1) * 32];
-    assert!((0..3).all(|y| row(y).chunks(4).all(white)), "whole rows of samples: {:?}", row(0));
-    assert!(row(3)[..16].chunks(4).all(white), "the samples the last luma row holds: {:?}", row(3));
-    assert!(row(3)[16..].iter().all(|v| *v == 0.0), "the rest of that row is transparent: {:?}", row(3));
-    assert!((4..8).all(|y| row(y).iter().all(|v| *v == 0.0)), "rows without luma are transparent");
+    assert!(px.iter().all(|value| *value == 0.0), "incomplete planes must not supply interpolation taps");
+    assert!(f.to_opaque_srgb8(1).is_none());
 }

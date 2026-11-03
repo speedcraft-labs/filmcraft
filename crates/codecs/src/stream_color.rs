@@ -6,7 +6,7 @@
 //! files the bitstream is the only place their colour is described. [`resolve`] merges it with
 //! what the container signals, which wins.
 
-use filmcraft_color::{ColorAssumed, ColorInfo, Matrix, Range, Transfer};
+use filmcraft_color::{ChromaSiting, ColorAssumed, ColorInfo, Matrix, Range, Transfer};
 use filmcraft_isobmff::{AvcConfig, CodecConfig, HevcConfig};
 
 use crate::video::primaries_from_code;
@@ -23,6 +23,7 @@ pub struct ColorCodes {
     pub matrix: u8,
     /// `None`: this place doesn't say.
     pub full_range: Option<bool>,
+    pub chroma_siting: Option<ChromaSiting>,
 }
 
 impl ColorCodes {
@@ -30,7 +31,7 @@ impl ColorCodes {
     /// fit a byte is no H.273 code point, so it counts as unspecified.
     pub fn from_wide(primaries: u64, transfer: u64, matrix: u64, full_range: Option<bool>) -> Self {
         let code = |v: u64| u8::try_from(v).unwrap_or(UNSPECIFIED);
-        Self { primaries: code(primaries), transfer: code(transfer), matrix: code(matrix), full_range }
+        Self { primaries: code(primaries), transfer: code(transfer), matrix: code(matrix), full_range, chroma_siting: None }
     }
 }
 
@@ -42,8 +43,17 @@ pub fn from_codec_config(codec: &CodecConfig) -> Option<ColorCodes> {
         CodecConfig::Avc(c) => avc(c),
         CodecConfig::Hevc(c) => hevc(c),
         CodecConfig::Av1(c) => av1(&c.config_obus),
+        CodecConfig::Vp9(c) => Some(ColorCodes {
+            primaries: c.colour_primaries,
+            transfer: c.transfer_characteristics,
+            matrix: c.matrix_coefficients,
+            full_range: Some(c.full_range),
+            chroma_siting: ChromaSiting::from_vp9(c.chroma_subsampling),
+        }),
         // VP8 has no colour signalling: its one colour space is BT.601 YUV, studio swing (RFC 6386 9.2)
-        CodecConfig::Unknown { fourcc, .. } if fourcc.0 == *b"vp08" => Some(ColorCodes { primaries: 2, transfer: 2, matrix: 6, full_range: Some(false) }),
+        CodecConfig::Unknown { fourcc, .. } if fourcc.0 == *b"vp08" => {
+            Some(ColorCodes { primaries: 2, transfer: 2, matrix: 6, full_range: Some(false), chroma_siting: Some(ChromaSiting::Center) })
+        }
         _ => None,
     }
 }
@@ -52,23 +62,41 @@ fn avc(c: &AvcConfig) -> Option<ColorCodes> {
     // NAL header byte: nal_unit_type 7 is an SPS
     let nal = c.sps.iter().find(|n| n.first().is_some_and(|h| h & 0x1f == 7))?;
     let sps = filmcraft_h264::params::Sps::parse(&filmcraft_bitstream::unescape_rbsp(nal.get(1..)?)).ok()?;
-    let v = sps.vui?;
-    Some(ColorCodes { primaries: v.colour_primaries, transfer: v.transfer_characteristics, matrix: v.matrix_coefficients, full_range: Some(v.full_range) })
+    let v = sps.vui.unwrap_or_default();
+    Some(ColorCodes {
+        primaries: v.colour_primaries,
+        transfer: v.transfer_characteristics,
+        matrix: v.matrix_coefficients,
+        full_range: Some(v.full_range),
+        chroma_siting: ChromaSiting::from_h26x(v.chroma_loc.map_or(0, |location| location.0)),
+    })
 }
 
 fn hevc(c: &HevcConfig) -> Option<ColorCodes> {
     // two-byte NAL header: nal_unit_type 33 is an SPS (whatever array the record files it under)
     let nal = c.arrays.iter().flat_map(|a| &a.nalus).find(|n| n.first().is_some_and(|h| (h >> 1) & 0x3f == 33))?;
     let sps = filmcraft_hevc::params::Sps::parse(&filmcraft_bitstream::unescape_rbsp(nal.get(2..)?)).ok()?;
-    let v = sps.vui?;
-    Some(ColorCodes { primaries: v.colour_primaries, transfer: v.transfer_characteristics, matrix: v.matrix_coefficients, full_range: Some(v.full_range) })
+    let v = sps.vui.unwrap_or_default();
+    Some(ColorCodes {
+        primaries: v.colour_primaries,
+        transfer: v.transfer_characteristics,
+        matrix: v.matrix_coefficients,
+        full_range: Some(v.full_range),
+        chroma_siting: ChromaSiting::from_h26x(v.chroma_loc.map_or(0, |location| location.0)),
+    })
 }
 
 fn av1(config_obus: &[u8]) -> Option<ColorCodes> {
     // OBU type 1: the sequence header
     let (_, payload) = crate::hw_frame::obus(config_obus).into_iter().find(|(t, _)| *t == 1)?;
     let c = filmcraft_av1::SequenceHeader::parse(payload).ok()?.color;
-    Some(ColorCodes { primaries: c.color_primaries, transfer: c.transfer_characteristics, matrix: c.matrix_coefficients, full_range: Some(c.color_range) })
+    Some(ColorCodes {
+        primaries: c.color_primaries,
+        transfer: c.transfer_characteristics,
+        matrix: c.matrix_coefficients,
+        full_range: Some(c.color_range),
+        chroma_siting: ChromaSiting::from_av1(c.chroma_sample_position),
+    })
 }
 
 /// Colour from the code points a file signals, most authoritative first (the container's colour
@@ -89,6 +117,9 @@ pub fn resolve(width: u32, height: u32, sources: &[ColorCodes]) -> ColorInfo {
     }
     if sources.iter().find_map(|s| s.full_range) == Some(true) {
         c.range = Range::Full;
+    }
+    if let Some(siting) = sources.iter().find_map(|source| source.chroma_siting) {
+        c.chroma_siting = siting;
     }
     c
 }

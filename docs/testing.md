@@ -100,6 +100,11 @@ are never linked or shipped ([AGENTS.md](../AGENTS.md) §2).
   `let ff = filmcraft_testkit::require_ffmpeg!();` (also `require_ffprobe!`, `require_oracles!`).
 - Some oracles need a recent ffmpeg: the APV tests (`crates/apv/tests/it/oracle.rs`) skip when
   `ffmpeg -formats` does not list `apv` (ffmpeg ≥ 8.0), naming the detected version.
+- Version-sensitive Linux oracle runs use BtbN's static FFmpeg/ffprobe build
+  `n8.1.3-24-g92611900bb` (FFmpeg 8.1.3), not Debian 13's 7.1.5 package. Set
+  `FILMCRAFT_FFMPEG` and `FILMCRAFT_FFPROBE` to that build and keep
+  `FILMCRAFT_REQUIRE_ORACLES=1`; the pinned archive and SHA-256 are recorded in
+  `speedcraft-labs/hyper`'s `research/VERIFICATION.md`.
 - Fixtures are generated on first use into `<workspace>/target/fixtures/<crate>/`
   (`filmcraft_testkit::fixtures_dir`; independent of `CARGO_TARGET_DIR`, so agents with private
   target dirs share them; `FILMCRAFT_FIXTURES_DIR` overrides the root) and reused afterwards.

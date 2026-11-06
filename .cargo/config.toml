@@ -1,7 +1,8 @@
 [alias]
 xtask = "run --quiet --package xtask --"
 
-# Playback and UI tests depend on frame workers meeting their deadlines. Keep
-# Cargo from running a test per detected CPU on shared Linux CI hosts.
+# Playback and UI tests depend on frame workers meeting their deadlines, while
+# parallel GPU tests can crash the Linux software Vulkan driver. Keep the test
+# harness serial; the tests that exercise concurrency do so inside each test.
 [env]
-RUST_TEST_THREADS = { value = "4", force = false }
+RUST_TEST_THREADS = { value = "1", force = false }

@@ -1,2 +1,7 @@
 [alias]
 xtask = "run --quiet --package xtask --"
+
+# Playback and UI tests depend on frame workers meeting their deadlines. Keep
+# Cargo from running a test per detected CPU on shared Linux CI hosts.
+[env]
+RUST_TEST_THREADS = { value = "4", force = false }

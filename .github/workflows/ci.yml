@@ -51,19 +51,19 @@ jobs:
 
           log="$RUNNER_TEMP/filmcraft-workspace-tests.log"
           failed_results=$(grep -Fc 'test result: FAILED.' "$log" || true)
-          failed_tests=$(grep -Ec '^test .* \.\.\. FAILED$' "$log" || true)
+          failed_tests=$(grep -Ec '^    [[:alnum:]_:]+$' "$log" || true)
           failed_target_count=$(grep -Eo '[0-9]+ targets? failed:' "$log" | tail -n 1 | cut -d ' ' -f1 || true)
 
           av1_failure=0
           if grep -Fq '`-p filmcraft-av1 --test fuzz_hostile`' "$log" \
-            && grep -Fq 'test hostile_streams_never_panic ... FAILED' "$log" \
+            && grep -Fq -- '---- hostile_streams_never_panic stdout ----' "$log" \
             && grep -Fq 'ffmpeg has libsvtav1 but could not encode the av1_fz_default seed' "$log"; then
             av1_failure=1
           fi
 
           perf_ui_failure=0
           if grep -Fq '`-p filmcraft-ui-egui --test it`' "$log" \
-            && grep -Fq 'test perf_ui::program_monitor_plays_on_while_a_value_is_dragged ... FAILED' "$log" \
+            && grep -Fq -- '---- perf_ui::program_monitor_plays_on_while_a_value_is_dragged stdout ----' "$log" \
             && grep -Fq 'the picture kept playing during the drag:' "$log"; then
             perf_ui_failure=1
           fi

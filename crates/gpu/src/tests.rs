@@ -563,6 +563,15 @@ fn hdr_input_gpu_matches_cpu() {
 fn many_threads_create_use_and_drop_devices_at_once() {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
+    let instance = crate::adapter::native_instance();
+    let Ok(adapter) = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())) else {
+        eprintln!("SKIPPED (concurrent device lifecycle): no GPU adapter");
+        return;
+    };
+    if adapter.get_info().device_type == wgpu::DeviceType::Cpu {
+        eprintln!("SKIPPED (concurrent device lifecycle): software CPU adapter");
+        return;
+    }
     const THREADS: usize = 16;
     const ROUNDS: usize = 4;
     let (tx, rx) = mpsc::channel();

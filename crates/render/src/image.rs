@@ -1,5 +1,6 @@
 //! The compositor's working image: premultiplied linear-light RGBA f32, row-major.
 
+use craft_resample::downsample2_floor_rgba_f32;
 use filmcraft_geom::Affine;
 use rayon::prelude::*;
 
@@ -149,23 +150,10 @@ impl Image {
 
     /// Half-size box downsample.
     pub fn downsample2(&self) -> Image {
-        if self.w == 0 || self.h == 0 {
-            return Image::new(0, 0);
+        match downsample2_floor_rgba_f32(&self.px, self.w, self.h) {
+            Some((w, h, px)) => Image { w, h, px },
+            None => Image::new(0, 0),
         }
-        let (w, h) = ((self.w / 2).max(1), (self.h / 2).max(1));
-        let mut out = Image::new(w, h);
-        out.px.par_chunks_mut(w * 4).enumerate().for_each(|(y, row)| {
-            for x in 0..w {
-                let a = self.get_clamped(2 * x as isize, 2 * y as isize);
-                let b = self.get_clamped(2 * x as isize + 1, 2 * y as isize);
-                let c = self.get_clamped(2 * x as isize, 2 * y as isize + 1);
-                let d = self.get_clamped(2 * x as isize + 1, 2 * y as isize + 1);
-                for k in 0..4 {
-                    row[x * 4 + k] = (a[k] + b[k] + c[k] + d[k]) * 0.25;
-                }
-            }
-        });
-        out
     }
 
     /// `self × (1 − w) + other × w` (same size; premultiplied, so this is a proper cross-fade).

@@ -1100,6 +1100,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "craft-resample"
+version = "0.1.0"
+source = "git+https://github.com/speedcraft-labs/craft-libs?rev=e6d994496a6d11cfb4b42a46847933f837c46afd#e6d994496a6d11cfb4b42a46847933f837c46afd"
+dependencies = [
+ "rayon",
+]
+
+[[package]]
 name = "craft-ui"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=c5a1cbfb5f9049f9270955caffb5bee5997aebf7#c5a1cbfb5f9049f9270955caffb5bee5997aebf7"
@@ -2421,6 +2429,7 @@ dependencies = [
 name = "filmcraft-render"
 version = "0.17.0"
 dependencies = [
+ "craft-resample",
  "filmcraft-audio-dsp",
  "filmcraft-captions",
  "filmcraft-color",

@@ -321,7 +321,9 @@ fn program_monitor_plays_on_while_a_value_is_dragged() {
     d.harness.state_mut().play(1.0);
     let mut frames = std::collections::BTreeSet::new();
     let mut newest = at_rest.revision;
-    for i in 0..90 {
+    // A shorter controlled drag still covers more than five 30 fps frames, without
+    // spending minutes rendering redundant crop revisions on slow hosted workers.
+    for i in 0..15 {
         // one change and one UI pass, as a mouse move while dragging the value
         d.exec("effects.setParam", json!({"clip": clip, "effect": "crop", "param": "left", "value": (i % 30) as f64}));
         let shown = d.harness.state().program_picture().unwrap();

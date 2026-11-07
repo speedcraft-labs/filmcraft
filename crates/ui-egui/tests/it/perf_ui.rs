@@ -21,11 +21,19 @@ struct Driver {
 
 impl Driver {
     fn demo() -> Self {
+        Self::demo_with_step_dt(None)
+    }
+
+    fn demo_with_step_dt(step_dt: Option<f32>) -> Self {
         let mut session = Session::default();
         session.execute("file.openDemoProject", json!({})).expect("demo project");
         let (tx, rx) = channel();
         let app = FilmcraftApp::new(session).with_control(rx);
-        let harness = Harness::builder().with_size(egui::vec2(1600.0, 980.0)).with_max_steps(10_000).build_eframe(move |_cc| app);
+        let mut builder = Harness::builder().with_size(egui::vec2(1600.0, 980.0)).with_max_steps(10_000);
+        if let Some(step_dt) = step_dt {
+            builder = builder.with_step_dt(step_dt);
+        }
+        let harness = builder.build_eframe(move |_cc| app);
         let mut d = Driver { harness, tx };
         d.frames(4);
         d
@@ -304,7 +312,8 @@ fn effect_controls_hint_that_clip_effects_are_not_remapped() {
 /// before the drag until the mouse rested.
 #[test]
 fn program_monitor_plays_on_while_a_value_is_dragged() {
-    let mut d = Driver::demo();
+    // Harness time advances by a fixed amount per UI pass, independent of the hosted frame rate.
+    let mut d = Driver::demo_with_step_dt(Some(1.0 / 60.0));
     let clip = d.exec("sequence.inspect", json!({}))["video"][0]["items"][0]["clip"].as_u64().unwrap();
     d.exec("effects.apply", json!({"clips": [clip], "effect": "crop"}));
     d.exec("playhead.set", json!({"seconds": 1.0}));
@@ -318,7 +327,11 @@ fn program_monitor_plays_on_while_a_value_is_dragged() {
         let shown = d.harness.state().program_picture().unwrap();
         frames.insert(shown.frame);
         newest = newest.max(shown.revision);
-        std::thread::sleep(std::time::Duration::from_millis(16));
+        // Wait for the currently due frame instead of assuming workers can render at 60 fps.
+        d.frames(1);
+        let due = d.due(at_rest);
+        d.ready(due);
+        d.frames(1);
     }
     assert!(frames.len() >= 5, "the picture kept playing during the drag: frames shown {frames:?}");
     assert!(newest > at_rest.revision, "the picture showed the dragged value, not only the one from before");

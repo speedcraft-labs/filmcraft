@@ -26,8 +26,8 @@ filmcraft-mpeg2v = { path = "crates/mpeg2v" }
 filmcraft-ac3 = { path = "crates/ac3" }
 filmcraft-mpa = { path = "crates/mpa" }
 filmcraft-ogg = { path = "crates/ogg" }
-filmcraft-h264 = { path = "crates/h264" }
-filmcraft-hevc = { path = "crates/hevc" }
+filmcraft-h264 = { package = "craft-h264", git = "https://github.com/storytold/craft-libs", rev = "20cc6894fc3acf56042ab2b5144642ead4e487bd" }
+filmcraft-hevc = { package = "craft-hevc", git = "https://github.com/storytold/craft-libs", rev = "20cc6894fc3acf56042ab2b5144642ead4e487bd" }
 filmcraft-vp8 = { path = "crates/vp8" }
 filmcraft-vp9 = { path = "crates/vp9" }
 filmcraft-prores = { path = "crates/prores" }
@@ -114,13 +114,13 @@ opt-level = 1
 debug = "line-tables-only"
 
 # Codec hot loops: debug-build tests (RFC/oracle vectors) are minutes slower below opt-level 3.
-[profile.dev.package.filmcraft-h264]
+[profile.dev.package.craft-h264]
 opt-level = 3
 
 [profile.dev.package.filmcraft-h264enc]
 opt-level = 3
 
-[profile.dev.package.filmcraft-hevc]
+[profile.dev.package.craft-hevc]
 opt-level = 3
 
 [profile.dev.package.filmcraft-prores]

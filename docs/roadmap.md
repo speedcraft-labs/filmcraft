@@ -1,6 +1,6 @@
 # Roadmap detail
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-30 · **Change:** minor (M8: Fujifilm F-Log / F-Log2 / F-Log2 C colour spaces; E-AC-3 #788, AVI #650, Russian #610, French #804, Indonesian #878, pt-BR #866 and German #630 no longer listed as open) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
+> **Last reviewed:** 2026-11-07 · **Last updated:** 2026-11-07 · **Change:** minor (H.264/HEVC decoders use craft-libs 20cc689 after conformance and reserved-CPU comparisons) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
 
 Forward-looking plan: milestones with status, the current focus and what's next, with estimates in
 Opus 5.5 agent-hours (calibration in [target-app-parity.md](target-app-parity.md#calibration)).
@@ -87,6 +87,7 @@ the web app shell ([G20](gaps.md#g20-the-web-app-shell)).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-07 | minor | H.264 and HEVC now use craft-libs 20cc689; conformance matches and benchmark confidence intervals include parity |
 | 2026-10-30 | minor | E-AC-3 (#788), AVI (#650), Russian (#610), French (#804), Indonesian (#878), pt-BR (#866) and German (#630) moved from open to done in the Alpha gate row, B3, M9 and L10N; hour estimates and statuses not re-measured |
 | 2026-10-10 | minor | Alpha gate table added (core-workflow gate): six core workflows, all pass on macOS; stage stays alpha |
 | 2026-10-10 | major | Created: milestone table moved from ROADMAP.md (M5 and M9 remaining work updated), HW and L10N rows, beta milestones B1–B7, Current focus from the re-measure |

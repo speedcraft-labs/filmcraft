@@ -907,10 +907,10 @@ pub(crate) fn median(img: &mut Image, r: isize) {
     }
     let src = img.px.clone();
     for channel in 0..4 {
-        let plane: Vec<f32> = src.chunks_exact(4).map(|px| px[channel]).collect();
+        let plane: Vec<f32> = src.as_chunks::<4>().0.iter().map(|px| px[channel]).collect();
         let filtered = if r >= 4 { median_ranked_plane(&plane, w, h, r as usize, MedianEdge::Clamp) } else { None }
             .unwrap_or_else(|| median_select_plane(&plane, w, h, r as usize, MedianEdge::Clamp));
-        for (px, value) in img.px.chunks_exact_mut(4).zip(filtered) {
+        for (px, value) in img.px.as_chunks_mut::<4>().0.iter_mut().zip(filtered) {
             px[channel] = value;
         }
     }
@@ -1077,7 +1077,7 @@ mod tests {
             let rgba = decoded.to_rgba32f();
             let (w, h) = (rgba.width() as usize, rgba.height() as usize);
             let mut img = Image::new(w, h);
-            for (dst, pixel) in img.px.chunks_exact_mut(4).zip(rgba.pixels()) {
+            for (dst, pixel) in img.px.as_chunks_mut::<4>().0.iter_mut().zip(rgba.pixels()) {
                 dst.copy_from_slice(&pixel.0);
             }
             let src = img.px.clone();

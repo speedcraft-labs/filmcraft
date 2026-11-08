@@ -35,9 +35,28 @@ jobs:
             sudo dpkg --configure -a || true
           done
           exit 1
+      - name: Install pinned FFmpeg oracle
+        env:
+          FFMPEG_ARCHIVE: ffmpeg-n8.1.3-24-g92611900bb-linux64-gpl-8.1.tar.xz
+          FFMPEG_SHA256: 292e10a463befababcd31e0c7d0c1e068d46342398d9674534eb07517c1ba38e
+        run: |
+          archive="$RUNNER_TEMP/$FFMPEG_ARCHIVE"
+          curl --fail --location --silent --show-error --retry 3 \
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-27-18-38/$FFMPEG_ARCHIVE" \
+            --output "$archive"
+          printf '%s  %s\n' "$FFMPEG_SHA256" "$archive" | sha256sum --check --strict
+          tar -xJf "$archive" -C "$RUNNER_TEMP"
+          ffmpeg_bin="$RUNNER_TEMP/ffmpeg-n8.1.3-24-g92611900bb-linux64-gpl-8.1/bin"
+          "$ffmpeg_bin/ffmpeg" -version | head -n 1 | grep -F 'n8.1.3-24-g92611900bb'
+          echo "$ffmpeg_bin" >> "$GITHUB_PATH"
+          {
+            echo "FILMCRAFT_FFMPEG=$ffmpeg_bin/ffmpeg"
+            echo "FILMCRAFT_FFPROBE=$ffmpeg_bin/ffprobe"
+            echo 'FILMCRAFT_REQUIRE_ORACLES=1'
+          } >> "$GITHUB_ENV"
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets
-      - name: Workspace tests (tracked ffmpeg exception)
+      - name: Workspace tests (tracked perf UI exception)
         shell: bash
         run: |
           set +e
@@ -54,13 +73,6 @@ jobs:
           failed_tests=$(grep -Ec '^    [[:alnum:]_:]+$' "$log" || true)
           failed_target_count=$(grep -Eo '[0-9]+ targets? failed:' "$log" | tail -n 1 | cut -d ' ' -f1 || true)
 
-          av1_failure=0
-          if grep -Fq -- '-p filmcraft-av1 --test fuzz_hostile' "$log" \
-            && grep -Fq -- '---- hostile_streams_never_panic stdout ----' "$log" \
-            && grep -Fq 'ffmpeg has libsvtav1 but could not encode the av1_fz_default seed' "$log"; then
-            av1_failure=1
-          fi
-
           perf_ui_failure=0
           if grep -Fq -- '-p filmcraft-ui-egui --test it' "$log" \
             && grep -Fq -- '---- perf_ui::program_monitor_plays_on_while_a_value_is_dragged stdout ----' "$log" \
@@ -68,14 +80,11 @@ jobs:
             perf_ui_failure=1
           fi
 
-          allowed_failure_count=$((av1_failure + perf_ui_failure))
+          allowed_failure_count=$perf_ui_failure
           if [[ "$allowed_failure_count" -gt 0 ]] \
             && [[ "$failed_target_count" -eq "$allowed_failure_count" ]] \
             && [[ "$failed_results" -eq "$allowed_failure_count" ]] \
             && [[ "$failed_tests" -eq "$allowed_failure_count" ]]; then
-            if [[ "$av1_failure" -eq 1 ]]; then
-              echo '::warning::Known Debian ffmpeg/SVT-AV1 seed-encode difference; tracked in https://github.com/speedcraft-labs/hyper/issues/258'
-            fi
             if [[ "$perf_ui_failure" -eq 1 ]]; then
               echo '::warning::Known hosted Linux frame-rate assumption in the Program monitor drag test; tracked in https://github.com/speedcraft-labs/hyper/issues/264'
             fi

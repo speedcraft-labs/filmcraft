@@ -263,6 +263,14 @@ fn probe(path: &str) -> Option<Value> {
     Some(serde_json::from_slice(&out.stdout).unwrap())
 }
 
+fn ffmpeg_lists_codec(codec: &str) -> bool {
+    let Some(ffmpeg) = filmcraft_testkit::ffmpeg() else { return false };
+    std::process::Command::new(ffmpeg)
+        .args(["-hide_banner", "-codecs"])
+        .output()
+        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).lines().any(|line| line.split_whitespace().nth(1) == Some(codec)))
+}
+
 fn stream<'a>(j: &'a Value, kind: &str) -> Option<&'a Value> {
     j["streams"].as_array().unwrap().iter().find(|s| s["codec_type"] == kind)
 }
@@ -507,6 +515,18 @@ fn verify_dnx_preset(name: &str, settings: &Value, video: &Value, audio: &Value,
 
 fn verify_apv_preset(name: &str, settings: &Value, video: &Value, audio: &Value, format_name: &str) {
     assert!(format_name.contains("mov"), "{name}: {format_name}");
+    if video["codec_name"] != "apv" && !ffmpeg_lists_codec("apv") {
+        assert!(video["codec_name"].is_null(), "{name}: {}", video["codec_name"]);
+        assert_eq!(video["codec_tag_string"], "apv1", "{name}: APV sample entry");
+        let version = filmcraft_testkit::ffmpeg().and_then(|ff| filmcraft_testkit::ffmpeg_version(&ff)).unwrap_or_else(|| "unknown version".to_string());
+        filmcraft_testkit::skip(
+            "APV export ffprobe oracle",
+            &format!(
+                "FFmpeg {version} has no APV codec registration; the MOV apv1 sample entry, audio, frame size and frame rate were verified, but ffprobe cannot report the APV codec profile"
+            ),
+        );
+        return;
+    }
     assert_eq!(video["codec_name"], "apv", "{name}");
     let profile = settings["apvProfile"].as_str().unwrap();
     let expected = match profile {

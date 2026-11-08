@@ -12,7 +12,7 @@
 //! shown as stored, without a film-log conversion. Y'CbCr is converted with the matrix the
 //! colorimetric field names (BT.709, or BT.601 for the 601 and composite video codes; by picture
 //! size when unspecified), in video range unless the reference low / high data codes span the
-//! whole code range; 4:2:2 chroma is reconstructed bilinearly from co-sited samples.
+//! whole code range; a 4:2:2 chroma sample is shared by its adjacent pair of luma samples.
 //!
 //! Not decoded (an "unsupported" error): run-length encoded elements, 1-bit and floating-point
 //! components, transposed orientations.
@@ -266,7 +266,7 @@ pub fn decode(name: &str, bytes: &[u8]) -> Result<Raster> {
                     (w, 1),
                     if sub { Chroma::C422 } else { Chroma::C444 },
                     filmcraft_color::ChromaSiting::Left,
-                    ChromaFilter::Bilinear,
+                    if sub { ChromaFilter::Nearest } else { ChromaFilter::Bilinear },
                 )
                 .ok_or_else(|| err(name, "invalid chroma planes"))?,
             )
@@ -406,7 +406,7 @@ mod tests {
         let mut f = file(true, 4, 1, Element { descriptor: 100, bits: 8, packing: 0 }, 0, &[128, 16, 128, 235, 102, 63, 240, 63]);
         f[ELEMENT + 22] = 6;
         let r = decode("a.dpx", &f).unwrap();
-        assert_eq!(r.rgba, [0, 0, 0, 255, 255, 228, 228, 255, 255, 1, 0, 255, 255, 1, 0, 255]);
+        assert_eq!(r.rgba, [0, 0, 0, 255, 255, 255, 255, 255, 255, 1, 0, 255, 255, 1, 0, 255]);
         assert!(!r.has_alpha);
         // red in BT.601 (colorimetric 7): the 601 code triple, rounded
         let mut f = file(true, 2, 1, Element { descriptor: 100, bits: 8, packing: 0 }, 0, &[90, 81, 240, 81]);
@@ -455,9 +455,9 @@ mod tests {
     }
 
     #[test]
-    fn packed_422_chroma_edge_matches_explicit_bilinear_444() {
+    fn packed_422_chroma_is_shared_by_each_adjacent_pair() {
         let packed = [80, 128, 128, 128, 180, 128, 128, 128];
-        let expanded = [80, 128, 128, 130, 128, 128, 180, 128, 128, 180, 128, 128];
+        let expanded = [80, 128, 128, 80, 128, 128, 180, 128, 128, 180, 128, 128];
         let source = file(true, 4, 1, Element { descriptor: 100, bits: 8, packing: 0 }, 0, &packed);
         let reference = file(true, 4, 1, Element { descriptor: 102, bits: 8, packing: 0 }, 0, &expanded);
         assert_eq!(decode("source.dpx", &source).unwrap().rgba, decode("reference.dpx", &reference).unwrap().rgba);

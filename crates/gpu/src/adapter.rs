@@ -122,12 +122,35 @@ fn wgpu_choice(candidates: &[Candidate], power: PowerPreference) -> Option<usize
     usable.min_by_key(|(index, c)| (type_order(c.device_type, power), *index)).map(|(index, _)| index)
 }
 
-/// A wgpu instance over the native backends (Vulkan, Metal, DX12), and OpenGL except on Windows.
-/// There GL starts a WGL context thread inside the vendor driver (NVIDIA's `nvoglv64` is both its
-/// GL driver and its Vulkan ICD); instances created and devices dropped concurrently then deadlock
-/// in that driver (#3418). Elsewhere GL stays, for machines where it is the only working backend.
+/// The process' shared wgpu instance over the native backends (Vulkan, Metal, DX12), adding OpenGL
+/// only when none of them is available. On Windows GL starts a WGL context thread inside NVIDIA's
+/// driver; on Linux GL and Vulkan can enter the same vendor loader. Creating and dropping separate
+/// instances concurrently can deadlock or crash there (#3418), so keep the selected instance alive
+/// for the process and share its handle across callers. Keep GL as a fallback for GL-only machines.
 pub(crate) fn native_instance() -> wgpu::Instance {
-    wgpu::Instance::new(native_descriptor())
+    static INSTANCE: std::sync::OnceLock<wgpu::Instance> = std::sync::OnceLock::new();
+    INSTANCE
+        .get_or_init(|| {
+            let mut descriptor = native_descriptor();
+            if let Some(backends) = wgpu::Backends::from_env() {
+                descriptor.backends = backends;
+                return wgpu::Instance::new(descriptor);
+            }
+
+            let all = descriptor.backends;
+            let native = all & wgpu::Backends::PRIMARY;
+            if !native.is_empty() {
+                let mut probe_descriptor = native_descriptor();
+                probe_descriptor.backends = native;
+                let instance = wgpu::Instance::new(probe_descriptor);
+                if !pollster::block_on(instance.enumerate_adapters(native)).is_empty() {
+                    return instance;
+                }
+            }
+            descriptor.backends = all;
+            wgpu::Instance::new(descriptor)
+        })
+        .clone()
 }
 
 /// [`native_instance`]'s descriptor. wgpu's environment variables apply to its flags and backend

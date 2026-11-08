@@ -364,8 +364,8 @@ fn values_no_tag_gives_are_reported_as_assumed() {
         (v, serde_json::to_value(src.info()).expect("json")["video"]["color_assumed"].clone())
     };
     let flags = |matrix: bool, transfer: bool, primaries: bool| serde_json::json!({"matrix": matrix, "transfer": transfer, "primaries": primaries});
-    let unspecified = Signal { codes: Some((2, 2, 2)), full_range: false };
-    let bt709 = Signal { codes: Some((1, 1, 1)), full_range: false };
+    let unspecified = Signal { codes: Some((2, 2, 2)), full_range: false, chroma_location: None };
+    let bt709 = Signal { codes: Some((1, 1, 1)), full_range: false, chroma_location: None };
     // no VUI, one that says "unspecified", or one with only the range: all three are defaults
     for vui in [None, Some(unspecified), Some(FULL_ONLY)] {
         let (color, assumed) = probe(avc(h264_sps(80, 45, vui)), None);

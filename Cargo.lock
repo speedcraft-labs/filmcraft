@@ -1059,18 +1059,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "craft-bench"
-version = "0.1.0"
-source = "git+https://github.com/speedcraft-labs/craft-libs?rev=0fda0983d08f15578814a660065b5e37e30dce37#0fda0983d08f15578814a660065b5e37e30dce37"
-dependencies = [
- "chrono",
- "cpu-time",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "craft-bitstream"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=20cc6894fc3acf56042ab2b5144642ead4e487bd#20cc6894fc3acf56042ab2b5144642ead4e487bd"
@@ -2242,7 +2230,6 @@ dependencies = [
 name = "filmcraft-frame"
 version = "0.17.0"
 dependencies = [
- "craft-bench",
  "filmcraft-color",
  "filmcraft-time",
  "proptest",

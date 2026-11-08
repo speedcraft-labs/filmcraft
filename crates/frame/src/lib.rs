@@ -12,7 +12,7 @@ pub mod pool;
 
 use chroma::{ChromaFilter, ChromaUpsampler};
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use filmcraft_color::{ColorInfo, DecodeTable, Matrix, Range, linear_to_srgb_u8, normalize_c, normalize_y, srgb_u8_to_linear_table, to_linear, ycbcr_to_rgb};
 use filmcraft_time::Tick;
@@ -22,6 +22,45 @@ use serde::{Deserialize, Serialize};
 /// Smallest full-size, opaque 8-bit Y'CbCr conversion that tabulates R' and B' per code pair
 /// (two tables of 65 536 values): below it the tables cost more than they save.
 const YUV8_PAIR_TABLE_MIN_PIXELS: usize = 1 << 18;
+
+struct Rgb8Tables {
+    y: [i32; 256],
+    red_v: [i32; 256],
+    green_u: [i32; 256],
+    green_v: [i32; 256],
+    blue_u: [i32; 256],
+}
+
+fn rgb8_tables(matrix: Matrix, range: Range) -> &'static Rgb8Tables {
+    static TABLES: [OnceLock<Rgb8Tables>; 6] = [const { OnceLock::new() }; 6];
+    let matrix_index = match matrix {
+        Matrix::Bt601 => 0,
+        Matrix::Bt709 => 1,
+        Matrix::Bt2020Ncl => 2,
+    };
+    let index = matrix_index * 2 + usize::from(range == Range::Full);
+    TABLES[index].get_or_init(|| {
+        let (kr, kb) = matrix.kr_kb();
+        let kg = 1.0 - kr - kb;
+        let (ys, yo, cs) = match range {
+            Range::Limited => (255.0 / 219.0, 16.0, 255.0 / 224.0),
+            Range::Full => (1.0, 0.0, 1.0),
+        };
+        let (crr, cbb) = (2.0 * (1.0 - kr) * cs, 2.0 * (1.0 - kb) * cs);
+        let (cgr, cgb) = (crr * kr / kg, cbb * kb / kg);
+        let q16 = |value: f32| (value * 65_536.0).round() as i32;
+        let mut tables = Rgb8Tables { y: [0; 256], red_v: [0; 256], green_u: [0; 256], green_v: [0; 256], blue_u: [0; 256] };
+        for code in 0..256 {
+            tables.y[code] = q16((code as f32 - yo) * ys);
+            let chroma = code as f32 - 128.0;
+            tables.red_v[code] = q16(crr * chroma);
+            tables.green_u[code] = q16(-cgb * chroma);
+            tables.green_v[code] = q16(-cgr * chroma);
+            tables.blue_u[code] = q16(cbb * chroma);
+        }
+        tables
+    })
+}
 
 fn normalization_tables(bits: u32, range: Range) -> (&'static [f32], &'static [f32]) {
     type Tables = (Vec<f32>, Vec<f32>);
@@ -712,42 +751,20 @@ impl VideoFrame {
                 else {
                     return vec![0; pixels * 4];
                 };
-                let (kr, kb) = self.color.matrix.kr_kb();
-                let kg = 1.0 - kr - kb;
-                let (ys, yo, cs) = match self.color.range {
-                    Range::Limited => (255.0 / 219.0, 16.0, 255.0 / 224.0),
-                    Range::Full => (1.0, 0.0, 1.0),
-                };
-                let (crr, cbb) = (2.0 * (1.0 - kr) * cs, 2.0 * (1.0 - kb) * cs);
-                let (cgr, cgb) = (crr * kr / kg, cbb * kb / kg);
-                // Keep per-pixel conversion integer-only. The bilinear sampler
-                // costs more than block replication, so precompute the same
-                // matrix/range equations once for each 8-bit code value.
-                let q16 = |value: f32| (value * 65_536.0).round() as i32;
-                let mut y_lut = [0i32; 256];
-                let mut red_v_lut = [0i32; 256];
-                let mut green_u_lut = [0i32; 256];
-                let mut green_v_lut = [0i32; 256];
-                let mut blue_u_lut = [0i32; 256];
-                for code in 0..256 {
-                    y_lut[code] = q16((code as f32 - yo) * ys);
-                    let chroma = code as f32 - 128.0;
-                    red_v_lut[code] = q16(crr * chroma);
-                    green_u_lut[code] = q16(-cgb * chroma);
-                    green_v_lut[code] = q16(-cgr * chroma);
-                    blue_u_lut[code] = q16(cbb * chroma);
-                }
+                // Keep per-pixel conversion integer-only. Tables are shared by
+                // frames using the same matrix and range.
+                let rgb = rgb8_tables(self.color.matrix, self.color.range);
                 let mut out = vec![0u8; w * h * 4];
                 out.par_chunks_mut(w * 4).enumerate().for_each(|(y, row)| {
                     let chroma = chroma.row(y);
                     let yrow = &planes[0][y * w..y * w + w];
                     for x in 0..w {
-                        let yy = y_lut[yrow[x] as usize];
+                        let yy = rgb.y[yrow[x] as usize];
                         let [u, v] = chroma.sample(x).map(|code| code as usize);
                         let o = &mut row[x * 4..x * 4 + 4];
-                        o[0] = q16_to_u8(yy + red_v_lut[v]);
-                        o[1] = q16_to_u8(yy + green_u_lut[u] + green_v_lut[v]);
-                        o[2] = q16_to_u8(yy + blue_u_lut[u]);
+                        o[0] = q16_to_u8(yy + rgb.red_v[v]);
+                        o[1] = q16_to_u8(yy + rgb.green_u[u] + rgb.green_v[v]);
+                        o[2] = q16_to_u8(yy + rgb.blue_u[u]);
                         o[3] = 255;
                     }
                 });

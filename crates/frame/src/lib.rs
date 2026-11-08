@@ -720,17 +720,34 @@ impl VideoFrame {
                 };
                 let (crr, cbb) = (2.0 * (1.0 - kr) * cs, 2.0 * (1.0 - kb) * cs);
                 let (cgr, cgb) = (crr * kr / kg, cbb * kb / kg);
+                // Keep per-pixel conversion integer-only. The bilinear sampler
+                // costs more than block replication, so precompute the same
+                // matrix/range equations once for each 8-bit code value.
+                let q16 = |value: f32| (value * 65_536.0).round() as i32;
+                let mut y_lut = [0i32; 256];
+                let mut red_v_lut = [0i32; 256];
+                let mut green_u_lut = [0i32; 256];
+                let mut green_v_lut = [0i32; 256];
+                let mut blue_u_lut = [0i32; 256];
+                for code in 0..256 {
+                    y_lut[code] = q16((code as f32 - yo) * ys);
+                    let chroma = code as f32 - 128.0;
+                    red_v_lut[code] = q16(crr * chroma);
+                    green_u_lut[code] = q16(-cgb * chroma);
+                    green_v_lut[code] = q16(-cgr * chroma);
+                    blue_u_lut[code] = q16(cbb * chroma);
+                }
                 let mut out = vec![0u8; w * h * 4];
                 out.par_chunks_mut(w * 4).enumerate().for_each(|(y, row)| {
                     let chroma = chroma.row(y);
                     let yrow = &planes[0][y * w..y * w + w];
                     for x in 0..w {
-                        let yy = (yrow[x] as f32 - yo) * ys;
-                        let [u, v] = chroma.sample(x).map(|code| code as f32 - 128.0);
+                        let yy = y_lut[yrow[x] as usize];
+                        let [u, v] = chroma.sample(x).map(|code| code as usize);
                         let o = &mut row[x * 4..x * 4 + 4];
-                        o[0] = (yy + crr * v).round().clamp(0.0, 255.0) as u8;
-                        o[1] = (yy - cgr * v - cgb * u).round().clamp(0.0, 255.0) as u8;
-                        o[2] = (yy + cbb * u).round().clamp(0.0, 255.0) as u8;
+                        o[0] = q16_to_u8(yy + red_v_lut[v]);
+                        o[1] = q16_to_u8(yy + green_u_lut[u] + green_v_lut[v]);
+                        o[2] = q16_to_u8(yy + blue_u_lut[u]);
                         o[3] = 255;
                     }
                 });
@@ -752,6 +769,12 @@ impl VideoFrame {
             _ => self.to_rgba8().as_chunks::<4>().0.iter().map(|p| (0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32) as u8).collect(),
         }
     }
+}
+
+#[inline]
+fn q16_to_u8(value: i32) -> u8 {
+    let rounded = if value >= 0 { (value + 32_768) >> 16 } else { -((-value + 32_768) >> 16) };
+    rounded.clamp(0, 255) as u8
 }
 
 /// Convert a row of premultiplied linear f32 RGBA into straight sRGB RGBA8.

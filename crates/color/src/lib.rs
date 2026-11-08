@@ -103,6 +103,64 @@ pub struct ColorInfo {
     pub transfer: Transfer,
     pub primaries: Primaries,
     pub range: Range,
+    #[serde(default)]
+    pub chroma_siting: ChromaSiting,
+}
+
+/// Chroma sample positions relative to the luma grid (ITU-T H.264 E.2.1).
+/// Unsignalled video uses left siting; JPEG-style 4:2:0 uses centre siting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ChromaSiting {
+    #[default]
+    Left,
+    Center,
+    TopLeft,
+    Top,
+    BottomLeft,
+    Bottom,
+}
+
+impl ChromaSiting {
+    pub fn from_h26x(code: u32) -> Option<Self> {
+        match code {
+            0 => Some(Self::Left),
+            1 => Some(Self::Center),
+            2 => Some(Self::TopLeft),
+            3 => Some(Self::Top),
+            4 => Some(Self::BottomLeft),
+            5 => Some(Self::Bottom),
+            _ => None,
+        }
+    }
+
+    pub fn from_av1(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Left),
+            2 => Some(Self::TopLeft),
+            _ => None,
+        }
+    }
+
+    /// VP Codec ISO Media File Format Binding `chromaSubsampling` positions.
+    pub fn from_vp9(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::Left),
+            1..=3 => Some(Self::TopLeft),
+            _ => None,
+        }
+    }
+
+    /// Phase in half-luma-sample units. Ignored on axes without subsampling.
+    pub fn half_sample_offsets(self) -> (u32, u32) {
+        match self {
+            Self::Left => (0, 1),
+            Self::Center => (1, 1),
+            Self::TopLeft => (0, 0),
+            Self::Top => (1, 0),
+            Self::BottomLeft => (0, 2),
+            Self::Bottom => (1, 2),
+        }
+    }
 }
 
 /// HDR static metadata of a stream: SMPTE ST 2086 mastering display luminance and the CTA-861.3
@@ -150,8 +208,10 @@ impl ColorAssumed {
 }
 
 impl ColorInfo {
-    pub const SRGB_FULL: ColorInfo = ColorInfo { matrix: Matrix::Bt709, transfer: Transfer::Srgb, primaries: Primaries::Bt709, range: Range::Full };
-    pub const REC709: ColorInfo = ColorInfo { matrix: Matrix::Bt709, transfer: Transfer::Bt709, primaries: Primaries::Bt709, range: Range::Limited };
+    pub const SRGB_FULL: ColorInfo =
+        ColorInfo { matrix: Matrix::Bt709, transfer: Transfer::Srgb, primaries: Primaries::Bt709, range: Range::Full, chroma_siting: ChromaSiting::Left };
+    pub const REC709: ColorInfo =
+        ColorInfo { matrix: Matrix::Bt709, transfer: Transfer::Bt709, primaries: Primaries::Bt709, range: Range::Limited, chroma_siting: ChromaSiting::Left };
 }
 
 /// Convert normalised Y'CbCr (Y in 0..1, Cb/Cr in -0.5..0.5) to non-linear R'G'B'.

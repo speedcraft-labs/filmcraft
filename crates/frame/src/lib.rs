@@ -7,9 +7,12 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
+pub mod chroma;
 pub mod pool;
 
-use std::sync::Arc;
+use chroma::{ChromaFilter, ChromaUpsampler};
+
+use std::sync::{Arc, OnceLock};
 
 use filmcraft_color::{ColorInfo, DecodeTable, Matrix, Range, linear_to_srgb_u8, normalize_c, normalize_y, srgb_u8_to_linear_table, to_linear, ycbcr_to_rgb};
 use filmcraft_time::Tick;
@@ -19,6 +22,58 @@ use serde::{Deserialize, Serialize};
 /// Smallest full-size, opaque 8-bit Y'CbCr conversion that tabulates R' and B' per code pair
 /// (two tables of 65 536 values): below it the tables cost more than they save.
 const YUV8_PAIR_TABLE_MIN_PIXELS: usize = 1 << 18;
+
+struct Rgb8Tables {
+    y: [i32; 256],
+    red_v: [i32; 256],
+    green_u: [i32; 256],
+    green_v: [i32; 256],
+    blue_u: [i32; 256],
+}
+
+fn rgb8_tables(matrix: Matrix, range: Range) -> &'static Rgb8Tables {
+    static TABLES: [OnceLock<Rgb8Tables>; 6] = [const { OnceLock::new() }; 6];
+    let matrix_index = match matrix {
+        Matrix::Bt601 => 0,
+        Matrix::Bt709 => 1,
+        Matrix::Bt2020Ncl => 2,
+    };
+    let index = matrix_index * 2 + usize::from(range == Range::Full);
+    TABLES[index].get_or_init(|| {
+        let (kr, kb) = matrix.kr_kb();
+        let kg = 1.0 - kr - kb;
+        let (ys, yo, cs) = match range {
+            Range::Limited => (255.0 / 219.0, 16.0, 255.0 / 224.0),
+            Range::Full => (1.0, 0.0, 1.0),
+        };
+        let (crr, cbb) = (2.0 * (1.0 - kr) * cs, 2.0 * (1.0 - kb) * cs);
+        let (cgr, cgb) = (crr * kr / kg, cbb * kb / kg);
+        let q16 = |value: f32| (value * 65_536.0).round() as i32;
+        let mut tables = Rgb8Tables { y: [0; 256], red_v: [0; 256], green_u: [0; 256], green_v: [0; 256], blue_u: [0; 256] };
+        for code in 0..256 {
+            tables.y[code] = q16((code as f32 - yo) * ys);
+            let chroma = code as f32 - 128.0;
+            tables.red_v[code] = q16(crr * chroma);
+            tables.green_u[code] = q16(-cgb * chroma);
+            tables.green_v[code] = q16(-cgr * chroma);
+            tables.blue_u[code] = q16(cbb * chroma);
+        }
+        tables
+    })
+}
+
+fn normalization_tables(bits: u32, range: Range) -> (&'static [f32], &'static [f32]) {
+    type Tables = (Vec<f32>, Vec<f32>);
+    static TABLES: [std::sync::OnceLock<Tables>; 8] = [const { std::sync::OnceLock::new() }; 8];
+    if !(9..=12).contains(&bits) {
+        return (&[], &[]);
+    }
+    let index = (bits as usize - 9) * 2 + usize::from(range == Range::Full);
+    let (luma, chroma) = TABLES[index].get_or_init(|| {
+        ((0..1 << bits).map(|code| normalize_y(code, bits, range)).collect(), (0..1 << bits).map(|code| normalize_c(code, bits, range)).collect())
+    });
+    (luma, chroma)
+}
 
 /// Chroma subsampling of planar Y'CbCr.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -290,11 +345,15 @@ impl VideoFrame {
     /// `decode` (a colour-managed curve: log, PQ, HLG scene light…) instead of the frame's
     /// transfer. Float frames are already linear and ignore it.
     pub fn to_linear_f32_decimated_with(&self, n: usize, decode: Option<&DecodeTable>) -> (usize, usize, Vec<f32>) {
+        self.to_linear_f32_decimated_with_filter(n, decode, ChromaFilter::Bilinear)
+    }
+
+    pub fn to_linear_f32_decimated_with_filter(&self, n: usize, decode: Option<&DecodeTable>, filter: ChromaFilter) -> (usize, usize, Vec<f32>) {
         let n = self.bounded_decimation(n);
         let (ow, oh) = self.decimated_size(n);
         // every element is written below, so a recycled buffer needs no zero-fill
         let mut out = pool::take_f32_overwritten(ow * oh * 4);
-        self.convert_region(n, decode, Region { x: 0, y: 0, w: ow, h: oh }, &mut out);
+        self.convert_region(n, decode, Region { x: 0, y: 0, w: ow, h: oh }, &mut out, filter);
         (ow, oh, out)
     }
 
@@ -313,7 +372,7 @@ impl VideoFrame {
         let (ow, oh) = self.decimated_size(n);
         let r = region.clip(ow, oh);
         let mut out = pool::take_f32_overwritten(r.w * r.h * 4);
-        self.convert_region(n, decode, r, &mut out);
+        self.convert_region(n, decode, r, &mut out, ChromaFilter::Bilinear);
         (r, out)
     }
 
@@ -324,11 +383,14 @@ impl VideoFrame {
     /// code pair as the float conversion does (at full size already as bytes); G' goes through the
     /// table of its quantised signal.
     pub fn to_opaque_srgb8(&self, n: usize) -> Option<Vec<u8>> {
+        self.to_opaque_srgb8_with_filter(n, ChromaFilter::Bilinear)
+    }
+
+    pub fn to_opaque_srgb8_with_filter(&self, n: usize, filter: ChromaFilter) -> Option<Vec<u8>> {
         let PixelData::Yuv8 { planes, chroma, alpha: None } = &self.data else { return None };
         let (w, h) = (self.width as usize, self.height as usize);
-        let (sx, sy) = chroma.shifts();
-        let (cw, ch) = (w.div_ceil(1 << sx), h.div_ceil(1 << sy));
-        if w == 0 || h == 0 || planes[0].len() < w * h || planes[1].len() < cw * ch || planes[2].len() < cw * ch {
+        let chroma = ChromaUpsampler::new([&planes[1], &planes[2]], (w, h), *chroma, self.color.chroma_siting, filter)?;
+        if planes[0].len() < w * h {
             return None;
         }
         let n = self.bounded_decimation(n);
@@ -352,10 +414,11 @@ impl VideoFrame {
             let (rt, bt) = (bytes(rt), bytes(bt));
             let gt: Vec<u8> = lin.iter().map(|&l| linear_to_srgb_u8(l)).collect();
             out.par_chunks_mut(w * 4).enumerate().for_each(|(y, row)| {
-                let cy = y >> sy;
-                let (ys, us, vs) = (&planes[0][y * w..(y + 1) * w], &planes[1][cy * cw..(cy + 1) * cw], &planes[2][cy * cw..(cy + 1) * cw]);
+                let chroma = chroma.row(y);
+                let ys = &planes[0][y * w..(y + 1) * w];
                 for (x, (o, &yc)) in row.as_chunks_mut::<4>().0.iter_mut().zip(ys).enumerate() {
-                    let (yc, uc, vc) = (usize::from(yc), usize::from(us[x >> sx]), usize::from(vs[x >> sx]));
+                    let [uc, vc] = chroma.sample(x).map(|code| code as usize);
+                    let yc = usize::from(yc);
                     let (yy, u, v) = (ytab[yc], ctab[uc], ctab[vc]);
                     *o = [rt[yc << 8 | vc], gt[at(yy - cr_g * v - cb_g * u)], bt[yc << 8 | uc], 255];
                 }
@@ -369,11 +432,11 @@ impl VideoFrame {
                 let mut acc = [0f32; 3];
                 for dy in 0..n {
                     let y = (oy * n + dy).min(h - 1);
-                    let cy = y >> sy;
+                    let chroma = chroma.row(y);
                     for dx in 0..n {
                         let x = (ox * n + dx).min(w - 1);
-                        let cx = x >> sx;
-                        let (yc, uc, vc) = (usize::from(planes[0][y * w + x]), usize::from(planes[1][cy * cw + cx]), usize::from(planes[2][cy * cw + cx]));
+                        let [uc, vc] = chroma.sample(x).map(|code| code as usize);
+                        let yc = usize::from(planes[0][y * w + x]);
                         let (yy, u, v) = (ytab[yc], ctab[uc], ctab[vc]);
                         acc[0] += rt[yc << 8 | vc] * 1.0;
                         acc[1] += lin[at(yy - cr_g * v - cb_g * u)] * 1.0;
@@ -387,7 +450,7 @@ impl VideoFrame {
     }
     /// Convert the rectangle `r` (inside the decimated picture) into `out`, which must hold exactly
     /// `r.w * r.h * 4` floats; every one of them is written.
-    fn convert_region(&self, n: usize, decode: Option<&DecodeTable>, r: Region, out: &mut [f32]) {
+    fn convert_region(&self, n: usize, decode: Option<&DecodeTable>, r: Region, out: &mut [f32], filter: ChromaFilter) {
         let (w, h) = (self.width as usize, self.height as usize);
         if r.w == 0 || r.h == 0 || out.len() != r.w * r.h * 4 {
             return;
@@ -474,17 +537,21 @@ impl VideoFrame {
                 });
             }
             PixelData::Yuv8 { planes, chroma, alpha } => {
-                let (sx, sy) = chroma.shifts();
-                let cw = w.div_ceil(1 << sx);
+                let Some(chroma) = ChromaUpsampler::new([&planes[1], &planes[2]], (w, h), *chroma, info.chroma_siting, filter) else {
+                    out.fill(0.0);
+                    return;
+                };
+                if planes[0].len() < w * h || alpha.as_ref().is_some_and(|plane| plane.len() < w * h) {
+                    out.fill(0.0);
+                    return;
+                }
                 let ytab: Vec<f32> = (0..256).map(|v| normalize_y(v, 8, info.range)).collect();
                 let ctab: Vec<f32> = (0..256).map(|v| normalize_c(v, 8, info.range)).collect();
                 let (kr, kb) = info.matrix.kr_kb();
                 let kg = 1.0 - kr - kb;
                 let (cr_r, cb_b) = (2.0 * (1.0 - kr), 2.0 * (1.0 - kb));
                 let (cr_g, cb_g) = (cr_r * kr / kg, cb_b * kb / kg);
-                let ch = h.div_ceil(1 << sy);
-                let fits = planes[0].len() >= w * h && planes[1].len() >= cw * ch && planes[2].len() >= cw * ch;
-                if n == 1 && alpha.is_none() && fits && r.w * r.h >= YUV8_PAIR_TABLE_MIN_PIXELS {
+                if n == 1 && alpha.is_none() && r.w * r.h >= YUV8_PAIR_TABLE_MIN_PIXELS {
                     // Full size and opaque (decoded video): R' depends on (Y', Cr) only and B' on
                     // (Y', Cb), so their decoded values are tabulated once for all 65 536 code
                     // pairs, with the very expressions the per-pixel loop below evaluates; G' is
@@ -497,16 +564,14 @@ impl VideoFrame {
                     let opaque = (0.0f32 + 1.0) * inv;
                     out.par_chunks_mut(r.w * 4).enumerate().for_each(|(ry, row)| {
                         let y = r.y + ry;
-                        let cy = y >> sy;
-                        let (Some(ys), Some(us), Some(vs)) =
-                            (planes[0].get(y * w + r.x..y * w + r.x + r.w), planes[1].get(cy * cw..(cy + 1) * cw), planes[2].get(cy * cw..(cy + 1) * cw))
-                        else {
+                        let chroma = chroma.row(y);
+                        let Some(ys) = planes[0].get(y * w + r.x..y * w + r.x + r.w) else {
                             row.fill(0.0);
                             return;
                         };
                         for (rx, (o, &yc)) in row.as_chunks_mut::<4>().0.iter_mut().zip(ys).enumerate() {
-                            let cx = (r.x + rx) >> sx;
-                            let (yc, uc, vc) = (usize::from(yc), us.get(cx).copied().map_or(0, usize::from), vs.get(cx).copied().map_or(0, usize::from));
+                            let [uc, vc] = chroma.sample(r.x + rx).map(|code| code as usize);
+                            let yc = usize::from(yc);
                             let (yy, u, v) = (ytab[yc], ctab[uc], ctab[vc]);
                             o[0] = rt[yc << 8 | vc];
                             o[1] = (0.0 + q(yy - cr_g * v - cb_g * u) * 1.0) * inv;
@@ -531,17 +596,17 @@ impl VideoFrame {
                     }
                     out.par_chunks_mut(r.w * 4).enumerate().for_each(|(ry, row)| {
                         let y = (r.y + ry).min(h - 1);
-                        let cy = y >> sy;
-                        let (yrow, urow, vrow) = (line(&planes[0], y, w), line(&planes[1], cy, cw), line(&planes[2], cy, cw));
+                        let chroma = chroma.row(y);
+                        let yrow = line(&planes[0], y, w);
                         let arow = alpha.as_ref().map(|al| line(al, y, w));
                         for (rx, px) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                             let x = (r.x + rx).min(w - 1);
-                            let cx = x >> sx;
-                            let (Some(&ys), Some(&us), Some(&vs)) = (yrow.get(x), urow.get(cx), vrow.get(cx)) else {
+                            let Some(&ys) = yrow.get(x) else {
                                 *px = [0.0; 4];
                                 continue;
                             };
-                            let (yy, u, v) = (ytab[usize::from(ys)], ctab[usize::from(us)], ctab[usize::from(vs)]);
+                            let [uc, vc] = chroma.sample(x).map(|code| code as usize);
+                            let (yy, u, v) = (ytab[usize::from(ys)], ctab[uc], ctab[vc]);
                             let a = arow.map_or(1.0, |al| al.get(x).map_or(0.0, |&s| f32::from(s) / 255.0));
                             *px = [
                                 (0.0 + q(yy + cr_r * v) * a) * inv,
@@ -560,13 +625,13 @@ impl VideoFrame {
                         let mut acc = [0f32; 4];
                         for dy in 0..n {
                             let y = (oy * n + dy).min(h - 1);
-                            let cy = y >> sy;
+                            let chroma = chroma.row(y);
                             for dx in 0..n {
                                 let x = (ox * n + dx).min(w - 1);
-                                let cx = x >> sx;
+                                let [uc, vc] = chroma.sample(x).map(|code| code as usize);
                                 let yy = ytab[planes[0][y * w + x] as usize];
-                                let u = ctab[planes[1][cy * cw + cx] as usize];
-                                let v = ctab[planes[2][cy * cw + cx] as usize];
+                                let u = ctab[uc];
+                                let v = ctab[vc];
                                 let a = alpha.as_ref().map_or(1.0, |al| al[y * w + x] as f32 / 255.0);
                                 acc[0] += q(yy + cr_r * v) * a;
                                 acc[1] += q(yy - cr_g * v - cb_g * u) * a;
@@ -581,17 +646,21 @@ impl VideoFrame {
                 });
             }
             PixelData::Yuv16 { planes, chroma, bits, alpha } => {
-                let (sx, sy) = chroma.shifts();
-                let cw = w.div_ceil(1 << sx);
+                let Some(chroma) = ChromaUpsampler::new([&planes[1], &planes[2]], (w, h), *chroma, info.chroma_siting, filter) else {
+                    out.fill(0.0);
+                    return;
+                };
                 let bits = *bits;
+                if !(9..=16).contains(&bits) || planes[0].len() < w * h || alpha.as_ref().is_some_and(|plane| plane.len() < w * h) {
+                    out.fill(0.0);
+                    return;
+                }
                 let amax = ((1u32 << bits) - 1) as f32;
                 // Per-code tables (exactly the values `normalize_*` returns) instead of two
                 // divisions per sample; a code past the table (a corrupt plane) is computed.
-                let codes = if bits <= 12 { 1usize << bits } else { 0 };
-                let ytab: Vec<f32> = (0..codes as u32).map(|v| normalize_y(v, bits, info.range)).collect();
-                let ctab: Vec<f32> = (0..codes as u32).map(|v| normalize_c(v, bits, info.range)).collect();
+                let (ytab, ctab) = normalization_tables(bits, info.range);
                 let ny = |v: u16| ytab.get(usize::from(v)).copied().unwrap_or_else(|| normalize_y(u32::from(v), bits, info.range));
-                let nc = |v: u16| ctab.get(usize::from(v)).copied().unwrap_or_else(|| normalize_c(u32::from(v), bits, info.range));
+                let nc = |v: u32| ctab.get(v as usize).copied().unwrap_or_else(|| normalize_c(v, bits, info.range));
                 out.par_chunks_mut(r.w * 4).enumerate().for_each(|(ry, row)| {
                     let oy = r.y + ry;
                     for rx in 0..r.w {
@@ -599,13 +668,13 @@ impl VideoFrame {
                         let mut acc = [0f32; 4];
                         for dy in 0..n {
                             let y = (oy * n + dy).min(h - 1);
-                            let cy = y >> sy;
+                            let chroma = chroma.row(y);
                             for dx in 0..n {
                                 let x = (ox * n + dx).min(w - 1);
-                                let cx = x >> sx;
+                                let [uc, vc] = chroma.sample(x);
                                 let yy = ny(planes[0][y * w + x]);
-                                let u = nc(planes[1][cy * cw + cx]);
-                                let v = nc(planes[2][cy * cw + cx]);
+                                let u = nc(uc);
+                                let v = nc(vc);
                                 let rgb = ycbcr_to_rgb(yy, u, v, info.matrix);
                                 let a = alpha.as_ref().map_or(1.0, |al| al[y * w + x] as f32 / amax);
                                 acc[0] += q(rgb[0]) * a;
@@ -662,37 +731,40 @@ impl VideoFrame {
 
     /// Convert to straight-alpha sRGB RGBA8 for display (fast paths for 8-bit sources).
     pub fn to_rgba8(&self) -> Vec<u8> {
+        self.to_rgba8_with_filter(ChromaFilter::Bilinear)
+    }
+
+    /// Convert to straight-alpha sRGB RGBA8 with an explicit chroma filter.
+    /// Nearest is retained for callers that deliberately need legacy sampling.
+    pub fn to_rgba8_with_filter(&self, filter: ChromaFilter) -> Vec<u8> {
         let (w, h) = (self.width as usize, self.height as usize);
+        let Some(pixels) = w.checked_mul(h).filter(|&pixels| pixels > 0 && pixels <= 1 << 28) else { return Vec::new() };
         match &self.data {
             PixelData::Rgba8(d) => d.as_ref().clone(),
             PixelData::Yuv8 { planes, chroma, alpha: None }
                 if matches!(self.color.transfer, filmcraft_color::Transfer::Bt709 | filmcraft_color::Transfer::Srgb) =>
             {
                 // Direct display path: Y'CbCr → R'G'B' without linearisation.
-                let (sx, sy) = chroma.shifts();
-                let cw = w.div_ceil(1 << sx);
-                let (kr, kb) = self.color.matrix.kr_kb();
-                let kg = 1.0 - kr - kb;
-                let (ys, yo, cs) = match self.color.range {
-                    Range::Limited => (255.0 / 219.0, 16.0, 255.0 / 224.0),
-                    Range::Full => (1.0, 0.0, 1.0),
+                let Some(chroma) = ChromaUpsampler::new([&planes[1], &planes[2]], (w, h), *chroma, self.color.chroma_siting, filter)
+                    .map(|upsampler| if filter == ChromaFilter::Bilinear { upsampler.with_horizontal_cache() } else { upsampler })
+                    .filter(|_| planes[0].len() >= pixels)
+                else {
+                    return vec![0; pixels * 4];
                 };
-                let (crr, cbb) = (2.0 * (1.0 - kr) * cs, 2.0 * (1.0 - kb) * cs);
-                let (cgr, cgb) = (crr * kr / kg, cbb * kb / kg);
+                // Keep per-pixel conversion integer-only. Tables are shared by
+                // frames using the same matrix and range.
+                let rgb = rgb8_tables(self.color.matrix, self.color.range);
                 let mut out = vec![0u8; w * h * 4];
                 out.par_chunks_mut(w * 4).enumerate().for_each(|(y, row)| {
-                    let cy = y >> sy;
+                    let chroma = chroma.row(y);
                     let yrow = &planes[0][y * w..y * w + w];
-                    let urow = &planes[1][cy * cw..cy * cw + cw];
-                    let vrow = &planes[2][cy * cw..cy * cw + cw];
                     for x in 0..w {
-                        let yy = (yrow[x] as f32 - yo) * ys;
-                        let u = urow[x >> sx] as f32 - 128.0;
-                        let v = vrow[x >> sx] as f32 - 128.0;
+                        let yy = rgb.y[yrow[x] as usize];
+                        let [u, v] = chroma.sample(x).map(|code| code as usize);
                         let o = &mut row[x * 4..x * 4 + 4];
-                        o[0] = (yy + crr * v).round().clamp(0.0, 255.0) as u8;
-                        o[1] = (yy - cgr * v - cgb * u).round().clamp(0.0, 255.0) as u8;
-                        o[2] = (yy + cbb * u).round().clamp(0.0, 255.0) as u8;
+                        o[0] = q16_to_u8(yy + rgb.red_v[v]);
+                        o[1] = q16_to_u8(yy + rgb.green_u[u] + rgb.green_v[v]);
+                        o[2] = q16_to_u8(yy + rgb.blue_u[u]);
                         o[3] = 255;
                     }
                 });
@@ -714,6 +786,12 @@ impl VideoFrame {
             _ => self.to_rgba8().as_chunks::<4>().0.iter().map(|p| (0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32) as u8).collect(),
         }
     }
+}
+
+#[inline]
+fn q16_to_u8(value: i32) -> u8 {
+    let rounded = if value >= 0 { (value + 32_768) >> 16 } else { -((-value + 32_768) >> 16) };
+    rounded.clamp(0, 255) as u8
 }
 
 /// Convert a row of premultiplied linear f32 RGBA into straight sRGB RGBA8.

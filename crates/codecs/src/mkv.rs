@@ -315,9 +315,28 @@ fn color_of(v: &filmcraft_matroska::VideoInfo, w: u32, h: u32, stream: Option<Co
         };
         ColorCodes::from_wide(code(col.primaries), code(col.transfer_characteristics), code(col.matrix_coefficients), range)
     });
-    let explicit = container.is_some_and(|c| Matrix::from_code(c.matrix).is_some() || Transfer::from_code(c.transfer).is_some() || c.full_range == Some(true));
+    let explicit = container.is_some_and(|c| Matrix::from_code(c.matrix).is_some() || Transfer::from_code(c.transfer).is_some() || c.full_range == Some(true))
+        || v.color.as_ref().is_some_and(|color| matches!(color.chroma_siting_horz, Some(1 | 2)) || matches!(color.chroma_siting_vert, Some(1 | 2)));
     let sources: Vec<ColorCodes> = [container, stream].into_iter().flatten().collect();
-    (crate::stream_color::resolve(w, h, &sources), crate::stream_color::assumed(&sources), explicit)
+    let mut color = crate::stream_color::resolve(w, h, &sources);
+    if let Some(container) = &v.color {
+        let (horizontal, vertical) = color.chroma_siting.half_sample_offsets();
+        let phase = |value, fallback| match value {
+            Some(1) => 0,
+            Some(2) => 1,
+            _ => fallback,
+        };
+        let code = match (phase(container.chroma_siting_horz, horizontal), phase(container.chroma_siting_vert, vertical)) {
+            (0, 0) => 2,
+            (1, 0) => 3,
+            (0, 1) => 0,
+            (1, 1) => 1,
+            (0, _) => 4,
+            _ => 5,
+        };
+        color.chroma_siting = filmcraft_color::ChromaSiting::from_h26x(code).unwrap_or_default();
+    }
+    (color, crate::stream_color::assumed(&sources), explicit)
 }
 
 fn codec_label(c: &Codec) -> String {
@@ -722,6 +741,34 @@ pub fn reader_opener(name: &str, head: &[u8], reader: &filmcraft_media::SharedRe
         return None;
     }
     Some(MkvSource::open_reader(name, reader.clone()).map(|s| Arc::new(s) as SharedSource).map_err(Into::into))
+}
+
+#[cfg(test)]
+mod chroma_tests {
+    use super::*;
+    use filmcraft_color::ChromaSiting;
+    use filmcraft_matroska::{MkvWriter, MuxOptions, TrackKind, TrackSpec};
+
+    #[test]
+    fn container_siting_overrides_each_axis_independently() {
+        let mut spec = TrackSpec::new(TrackKind::Video, "V_VP8");
+        spec.video_size = Some((4, 4));
+        let mut writer = MkvWriter::new(std::io::Cursor::new(Vec::new()), vec![spec], MuxOptions::default()).unwrap();
+        writer.write_frame(0, 0, true, &[0; 10], None).unwrap();
+        let source = MkvSource::open("siting.mkv", writer.finish().unwrap().into_inner().into()).unwrap();
+        let mut video = source.file.tracks[0].video.clone().unwrap();
+        let stream = ColorCodes { chroma_siting: Some(ChromaSiting::BottomLeft), ..ColorCodes::from_wide(2, 2, 2, None) };
+        for (horizontal, vertical, expected) in [
+            (Some(2), None, ChromaSiting::Bottom),
+            (None, Some(2), ChromaSiting::Left),
+            (Some(2), Some(2), ChromaSiting::Center),
+            (Some(1), Some(1), ChromaSiting::TopLeft),
+            (Some(0), Some(0), ChromaSiting::BottomLeft),
+        ] {
+            video.color = Some(filmcraft_matroska::Color { chroma_siting_horz: horizontal, chroma_siting_vert: vertical, ..Default::default() });
+            assert_eq!(color_of(&video, 4, 4, Some(stream)).0.chroma_siting, expected);
+        }
+    }
 }
 
 #[cfg(test)]

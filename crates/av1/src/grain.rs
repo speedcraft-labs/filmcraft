@@ -473,6 +473,7 @@ mod tests {
             mono_chrome: false,
             planes: [vec![512; w * h], vec![512; w * h / 4], vec![512; w * h / 4]],
             color_primaries: 1,
+            chroma_sample_position: 0,
             transfer_characteristics: 1,
             matrix_coefficients: 1,
             full_range: false,

@@ -6,7 +6,7 @@ gamut mapping, and LUT files.
 
 | Module | Contents |
 |---|---|
-| `lib.rs` | `Matrix`/`Transfer`/`Primaries`/`Range`/`ColorInfo` (stream metadata), Y'CbCr↔R'G'B', sRGB, PQ (ST 2084), HLG (ARIB STD-B67), HSL, hex colours |
+| `lib.rs` | `Matrix`/`Transfer`/`Primaries`/`Range`/`ChromaSiting`/`ColorInfo` (stream metadata), Y'CbCr↔R'G'B', sRGB, PQ (ST 2084), HLG (ARIB STD-B67), HSL, hex colours |
 | `log` | camera log curves (encode/decode), their signal domains |
 | `spaces` | gamuts and 3×3 matrices (SMPTE RP 177), `ColorSpace` (Interpret Footage choices), `WorkingSpace`, `ColorPipeline` |
 | `transform` | `InputTransform` (source → working), `OutputTransform` (working → monitor / export), BT.2390 tone mapping, gamut compression |

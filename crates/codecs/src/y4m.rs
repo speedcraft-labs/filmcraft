@@ -179,7 +179,13 @@ impl Y4mSource {
         if frames.is_empty() {
             return Err(bad("no complete frames"));
         }
-        let color = ColorInfo { matrix: filmcraft_frame::default_matrix(w, h), range: if full { Range::Full } else { Range::Limited }, ..ColorInfo::REC709 };
+        let chroma_siting = if colour == "420" || colour == "420jpeg" { filmcraft_color::ChromaSiting::Center } else { filmcraft_color::ChromaSiting::Left };
+        let color = ColorInfo {
+            matrix: filmcraft_frame::default_matrix(w, h),
+            range: if full { Range::Full } else { Range::Limited },
+            chroma_siting,
+            ..ColorInfo::REC709
+        };
         let duration = Tick::from_rational(frames.len() as i64, rate.den, rate.num);
         let bitrate = (frame_bytes as u64 * 8).checked_mul(rate.num as u64).map(|b| b / rate.den as u64);
         let info = MediaInfo {
@@ -283,6 +289,20 @@ pub fn reader_opener(name: &str, head: &[u8], reader: &filmcraft_media::SharedRe
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn declared_chroma_siting_survives_decode() {
+        for (tag, siting) in [
+            ("420jpeg", filmcraft_color::ChromaSiting::Center),
+            ("420mpeg2", filmcraft_color::ChromaSiting::Left),
+            ("422", filmcraft_color::ChromaSiting::Left),
+        ] {
+            let mut bytes = format!("YUV4MPEG2 W4 H2 F25:1 Ip C{tag}\nFRAME\n").into_bytes();
+            bytes.extend_from_slice(&[128; 16]);
+            let source = Y4mSource::open("siting.y4m", bytes.into()).unwrap();
+            assert_eq!(source.frame(0).unwrap().color.chroma_siting, siting);
+        }
+    }
 
     #[test]
     fn colour_space_names() {

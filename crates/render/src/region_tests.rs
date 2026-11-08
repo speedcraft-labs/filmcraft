@@ -351,7 +351,7 @@ fn a_region_layer_expands_to_the_whole_layer() {
 #[test]
 fn hdr_media_is_planned_for_the_gpu_with_its_colour_management() {
     use filmcraft_color::{ColorInfo, Matrix, Primaries, Range, Transfer};
-    let hdr = |transfer| ColorInfo { matrix: Matrix::Bt2020Ncl, transfer, primaries: Primaries::Bt2020, range: Range::Limited };
+    let hdr = |transfer| ColorInfo { matrix: Matrix::Bt2020Ncl, transfer, primaries: Primaries::Bt2020, range: Range::Limited, ..ColorInfo::REC709 };
     for (name, color) in
         [("HLG", hdr(Transfer::Hlg)), ("PQ", hdr(Transfer::Pq)), ("BT.2020 SDR", ColorInfo { primaries: Primaries::Bt2020, ..ColorInfo::REC709 })]
     {

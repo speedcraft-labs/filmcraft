@@ -7,7 +7,7 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use filmcraft_bitstream::{BitWriter, escape_rbsp};
-use filmcraft_color::{ColorInfo, ColorSpace, Matrix, Primaries, Range, Transfer};
+use filmcraft_color::{ChromaSiting, ColorInfo, ColorSpace, Matrix, Primaries, Range, Transfer};
 use filmcraft_isobmff::{Av1Config, AvcConfig, Brand, CodecConfig, HevcConfig, HevcNalArray, Mp4Writer, SampleEntry, TrackConfig, WriteSample, WriterOptions};
 use filmcraft_matroska::{MkvWriter, MuxOptions, TrackKind, TrackSpec};
 use filmcraft_media::MediaSource;
@@ -20,11 +20,12 @@ use crate::stream_color::{ColorCodes, from_codec_config, resolve};
 struct Signal {
     codes: Option<(u8, u8, u8)>,
     full_range: bool,
+    chroma_location: Option<u32>,
 }
 
-const PQ_2020: Signal = Signal { codes: Some((9, 16, 9)), full_range: false };
-const SMPTE_170M: Signal = Signal { codes: Some((6, 6, 6)), full_range: false };
-const FULL_ONLY: Signal = Signal { codes: None, full_range: true };
+const PQ_2020: Signal = Signal { codes: Some((9, 16, 9)), full_range: false, chroma_location: None };
+const SMPTE_170M: Signal = Signal { codes: Some((6, 6, 6)), full_range: false, chroma_location: None };
+const FULL_ONLY: Signal = Signal { codes: None, full_range: true, chroma_location: None };
 
 fn signal(w: &mut BitWriter, s: Signal) {
     w.write_bit(true); // video_signal_type_present_flag
@@ -58,7 +59,11 @@ fn h264_sps(mbs_w: u32, mbs_h: u32, vui: Option<Signal>) -> Vec<u8> {
         w.write_bit(false); // aspect_ratio_info_present_flag
         w.write_bit(false); // overscan_info_present_flag
         signal(&mut w, s);
-        w.write_bit(false); // chroma_loc_info_present_flag
+        w.write_bit(s.chroma_location.is_some());
+        if let Some(location) = s.chroma_location {
+            w.write_ue(location);
+            w.write_ue(location);
+        }
         w.write_bit(false); // timing_info_present_flag
         w.write_bit(false); // nal_hrd_parameters_present_flag
         w.write_bit(false); // vcl_hrd_parameters_present_flag
@@ -118,7 +123,11 @@ fn hevc_sps(width: u32, height: u32, vui: Option<Signal>) -> Vec<u8> {
         w.write_bit(false); // aspect_ratio_info_present_flag
         w.write_bit(false); // overscan_info_present_flag
         signal(&mut w, s);
-        w.write_bit(false); // chroma_loc_info_present_flag
+        w.write_bit(s.chroma_location.is_some());
+        if let Some(location) = s.chroma_location {
+            w.write_ue(location);
+            w.write_ue(location);
+        }
         w.write_bit(false); // neutral_chroma_indication_flag
         w.write_bit(false); // field_seq_flag
         w.write_bit(false); // frame_field_info_present_flag
@@ -136,6 +145,10 @@ fn hevc_sps(width: u32, height: u32, vui: Option<Signal>) -> Vec<u8> {
 /// An AV1 sequence header OBU (AV1 bitstream spec §5.5; reduced still-picture header, profile 0,
 /// 10-bit 4:2:0) of `width`×`height` with `color_config` signalling `codes` and `full_range`.
 fn av1_sequence_header(width: u32, height: u32, codes: Option<(u8, u8, u8)>, full_range: bool) -> Vec<u8> {
+    av1_sequence_header_with_siting(width, height, codes, full_range, 0)
+}
+
+fn av1_sequence_header_with_siting(width: u32, height: u32, codes: Option<(u8, u8, u8)>, full_range: bool, position: u32) -> Vec<u8> {
     let mut w = BitWriter::new();
     w.write_bits(0, 3); // seq_profile
     w.write_bit(true); // still_picture
@@ -156,7 +169,7 @@ fn av1_sequence_header(width: u32, height: u32, codes: Option<(u8, u8, u8)>, ful
         w.write_bits(m.into(), 8);
     }
     w.write_bit(full_range); // color_range
-    w.write_bits(0, 2); // chroma_sample_position
+    w.write_bits(position, 2);
     w.write_bit(false); // separate_uv_delta_q
     w.write_bit(false); // film_grain_params_present
     w.rbsp_trailing();
@@ -211,7 +224,7 @@ fn mp4_color(codec: CodecConfig, w: u16, h: u16, colr: Option<filmcraft_isobmff:
 #[test]
 fn hevc_pq_without_colr_is_rec2100_pq() {
     let c = mp4_color(hevc(hevc_sps(1920, 1080, Some(PQ_2020))), 1920, 1080, None);
-    assert_eq!(c, ColorInfo { matrix: Matrix::Bt2020Ncl, transfer: Transfer::Pq, primaries: Primaries::Bt2020, range: Range::Limited });
+    assert_eq!(c, ColorInfo { matrix: Matrix::Bt2020Ncl, transfer: Transfer::Pq, primaries: Primaries::Bt2020, range: Range::Limited, ..ColorInfo::REC709 });
     assert_eq!(ColorSpace::from_info(&c), ColorSpace::Rec2100Pq);
     assert!(ColorSpace::from_info(&c).is_hdr());
 }
@@ -224,18 +237,38 @@ fn full_range_h264_without_colr_is_full_range() {
 }
 
 #[test]
+fn codec_chroma_location_survives_container_colour_override() {
+    for (code, siting) in [
+        (0, ChromaSiting::Left),
+        (1, ChromaSiting::Center),
+        (2, ChromaSiting::TopLeft),
+        (3, ChromaSiting::Top),
+        (4, ChromaSiting::BottomLeft),
+        (5, ChromaSiting::Bottom),
+    ] {
+        let signal = Signal { chroma_location: Some(code), ..PQ_2020 };
+        for codec in [avc(h264_sps(120, 68, Some(signal))), hevc(hevc_sps(1920, 1080, Some(signal)))] {
+            let colr = filmcraft_isobmff::ColorInfo::Nclx { primaries: 1, transfer: 1, matrix: 1, full_range: false };
+            let color = mp4_color(codec, 1920, 1080, Some(colr));
+            assert_eq!(color.chroma_siting, siting);
+            assert_eq!(color.transfer, Transfer::Bt709);
+        }
+    }
+}
+
+#[test]
 fn bt601_sd_h264_without_colr_has_bt601_primaries() {
     let c = mp4_color(avc(h264_sps(45, 30, Some(SMPTE_170M))), 720, 480, None);
-    assert_eq!(c, ColorInfo { matrix: Matrix::Bt601, transfer: Transfer::Bt709, primaries: Primaries::Bt601_525, range: Range::Limited });
+    assert_eq!(c, ColorInfo { matrix: Matrix::Bt601, transfer: Transfer::Bt709, primaries: Primaries::Bt601_525, range: Range::Limited, ..ColorInfo::REC709 });
     // PAL (BT.470 BG primaries, BT.601 matrix)
-    let pal = Signal { codes: Some((5, 6, 5)), full_range: false };
+    let pal = Signal { codes: Some((5, 6, 5)), ..SMPTE_170M };
     let c = mp4_color(avc(h264_sps(45, 36, Some(pal))), 720, 576, None);
     assert_eq!((c.primaries, c.matrix), (Primaries::Bt601_625, Matrix::Bt601));
 }
 
 #[test]
 fn unspecified_or_missing_vui_keeps_the_size_defaults() {
-    let unspecified = Signal { codes: Some((2, 2, 2)), full_range: false };
+    let unspecified = Signal { codes: Some((2, 2, 2)), ..SMPTE_170M };
     for vui in [None, Some(unspecified)] {
         assert_eq!(mp4_color(avc(h264_sps(80, 45, vui)), 1280, 720, None), ColorInfo::REC709);
         assert_eq!(mp4_color(hevc(hevc_sps(1920, 1080, vui)), 1920, 1080, None), ColorInfo::REC709);
@@ -270,12 +303,22 @@ fn colr_wins_over_the_bitstream() {
 #[test]
 fn av1_sequence_header_colour() {
     let obu = av1_sequence_header(1920, 1080, Some((9, 16, 9)), false);
-    assert_eq!(from_codec_config(&av1(obu.clone())), Some(ColorCodes { primaries: 9, transfer: 16, matrix: 9, full_range: Some(false) }));
+    assert_eq!(from_codec_config(&av1(obu.clone())), Some(ColorCodes { primaries: 9, transfer: 16, matrix: 9, full_range: Some(false), chroma_siting: None }));
     let c = mp4_color(av1(obu), 1920, 1080, None);
     assert_eq!(ColorSpace::from_info(&c), ColorSpace::Rec2100Pq);
     // no colour description: unspecified code points, the range flag still counts
     let obu = av1_sequence_header(640, 360, None, true);
-    assert_eq!(from_codec_config(&av1(obu)), Some(ColorCodes { primaries: 2, transfer: 2, matrix: 2, full_range: Some(true) }));
+    assert_eq!(from_codec_config(&av1(obu)), Some(ColorCodes { primaries: 2, transfer: 2, matrix: 2, full_range: Some(true), chroma_siting: None }));
+}
+
+#[test]
+fn av1_signalled_chroma_position() {
+    for (position, siting) in [(1, ChromaSiting::Left), (2, ChromaSiting::TopLeft)] {
+        let obu = av1_sequence_header_with_siting(32, 24, None, false, position);
+        let config = av1(obu.clone());
+        assert_eq!(from_codec_config(&config).unwrap().chroma_siting, Some(siting));
+        assert_eq!(mp4_color(config, 32, 24, None).chroma_siting, siting);
+    }
 }
 
 #[test]
@@ -297,14 +340,17 @@ fn matroska_without_colour_uses_the_bitstream() {
 
 #[test]
 fn resolve_takes_each_field_from_the_first_source_that_knows_it() {
-    let colr = ColorCodes { primaries: 1, transfer: 2, matrix: 0, full_range: None };
-    let vui = ColorCodes { primaries: 9, transfer: 18, matrix: 9, full_range: Some(true) };
+    let colr = ColorCodes { primaries: 1, transfer: 2, matrix: 0, full_range: None, chroma_siting: None };
+    let vui = ColorCodes { primaries: 9, transfer: 18, matrix: 9, full_range: Some(true), chroma_siting: Some(ChromaSiting::Center) };
     // matrix 0 (identity) is not one we know: the VUI's BT.2020 is used
     let c = resolve(1920, 1080, &[colr, vui]);
-    assert_eq!(c, ColorInfo { matrix: Matrix::Bt2020Ncl, transfer: Transfer::Hlg, primaries: Primaries::Bt709, range: Range::Full });
+    assert_eq!(
+        c,
+        ColorInfo { matrix: Matrix::Bt2020Ncl, transfer: Transfer::Hlg, primaries: Primaries::Bt709, range: Range::Full, chroma_siting: ChromaSiting::Center }
+    );
     assert_eq!(resolve(720, 480, &[]), ColorInfo { matrix: Matrix::Bt601, ..ColorInfo::REC709 });
     // code points that don't fit a byte are unspecified, not truncated (0x109 is not 9)
-    assert_eq!(ColorCodes::from_wide(0x109, 0x110, 0x109, None), ColorCodes { primaries: 2, transfer: 2, matrix: 2, full_range: None });
+    assert_eq!(ColorCodes::from_wide(0x109, 0x110, 0x109, None), ColorCodes { primaries: 2, transfer: 2, matrix: 2, full_range: None, chroma_siting: None });
 }
 
 /// `probe` prints `video.color_assumed`: which colour values no tag in the file gave. An untagged

@@ -309,7 +309,8 @@ impl H264Decoder {
         let y = tight_plane(p.y, p.y_stride, w, h);
         let u = tight_plane(p.u, p.uv_stride, cw, ch);
         let v = tight_plane(p.v, p.uv_stride, cw, ch);
-        let color = vui_color(p.width, p.height, p.color.primaries, p.color.matrix, p.color.transfer, p.color.full_range);
+        let mut color = vui_color(p.width, p.height, p.color.primaries, p.color.matrix, p.color.transfer, p.color.full_range);
+        color.chroma_siting = filmcraft_color::ChromaSiting::from_h26x(p.color.chroma_location).unwrap_or_default();
         let par = sar_par(p.sar);
         let frame = VideoFrame {
             width: p.width,
@@ -438,7 +439,8 @@ impl HevcDecoder {
                 alpha: None,
             },
         };
-        let color = vui_color(p.width, p.height, p.color.primaries, p.color.matrix, p.color.transfer, p.color.full_range);
+        let mut color = vui_color(p.width, p.height, p.color.primaries, p.color.matrix, p.color.transfer, p.color.full_range);
+        color.chroma_siting = filmcraft_color::ChromaSiting::from_h26x(p.color.chroma_location).unwrap_or_default();
         let par = sar_par(p.sar);
         let frame = VideoFrame { width: p.width, height: p.height, data, color, par, pts: filmcraft_time::Tick::ZERO };
         DecodedFrame { pts: p.pts, frame, draft: p.draft }
@@ -500,6 +502,7 @@ pub struct Vp9Decoder {
     /// bitstream.
     transfer: Option<filmcraft_color::Transfer>,
     primaries: Option<filmcraft_color::Primaries>,
+    chroma_siting: filmcraft_color::ChromaSiting,
 }
 
 /// Colour primaries from an ISO/IEC 23091-2 code.
@@ -521,6 +524,7 @@ impl Vp9Decoder {
             dec: filmcraft_vp9::Decoder::new(),
             transfer: cfg.and_then(|c| filmcraft_color::Transfer::from_code(c.transfer_characteristics)),
             primaries: cfg.and_then(|c| primaries_from_code(c.colour_primaries)),
+            chroma_siting: cfg.and_then(|c| filmcraft_color::ChromaSiting::from_vp9(c.chroma_subsampling)).unwrap_or_default(),
         }
     }
 
@@ -533,7 +537,8 @@ impl Vp9Decoder {
         let (w, h) = (p.width as usize, p.height as usize);
         let (cw, ch) = (p.chroma_width as usize, p.chroma_height as usize);
         // (shared with the hardware decoders: `hw_frame::vp9_color`)
-        let color = crate::hw_frame::vp9_color(p.width, p.height, p.color.color_space, p.color.full_range, self.transfer, self.primaries);
+        let mut color = crate::hw_frame::vp9_color(p.width, p.height, p.color.color_space, p.color.full_range, self.transfer, self.primaries);
+        color.chroma_siting = self.chroma_siting;
         let (pts, draft) = (p.pts, p.draft);
         if p.color.color_space == 7 {
             // RGB (profiles 1 / 3, 4:4:4): the planes carry G, B, R.
@@ -634,7 +639,11 @@ impl Vp8Decoder {
         use filmcraft_frame::{Chroma, PixelData};
         use std::sync::Arc;
         // color_space 0 is BT.601 YUV (RFC 6386 9.2), studio swing; a container's Colour wins
-        let color = filmcraft_color::ColorInfo { matrix: filmcraft_color::Matrix::Bt601, ..filmcraft_color::ColorInfo::REC709 };
+        let color = filmcraft_color::ColorInfo {
+            matrix: filmcraft_color::Matrix::Bt601,
+            chroma_siting: filmcraft_color::ChromaSiting::Center,
+            ..filmcraft_color::ColorInfo::REC709
+        };
         let data = PixelData::Yuv8 { planes: [Arc::new(p.y), Arc::new(p.u), Arc::new(p.v)], chroma: Chroma::C420, alpha: None };
         let frame = VideoFrame { width: p.width, height: p.height, data, color, par: (1, 1), pts: filmcraft_time::Tick::ZERO };
         DecodedFrame { pts: p.pts, frame, draft: false }
@@ -687,7 +696,8 @@ impl Av1Decoder {
         let w = p.width as usize;
         let h = p.height as usize;
         // (shared with the hardware decoders: `hw_frame::av1_color`)
-        let color = crate::hw_frame::av1_color(p.width, p.height, p.matrix_coefficients, p.transfer_characteristics, p.color_primaries, p.full_range);
+        let mut color = crate::hw_frame::av1_color(p.width, p.height, p.matrix_coefficients, p.transfer_characteristics, p.color_primaries, p.full_range);
+        color.chroma_siting = filmcraft_color::ChromaSiting::from_av1(p.chroma_sample_position).unwrap_or_default();
         let chroma = match (p.subsampling_x, p.subsampling_y) {
             (1, 1) => filmcraft_frame::Chroma::C420,
             (1, 0) => filmcraft_frame::Chroma::C422,

@@ -61,6 +61,7 @@ pub struct Picture {
     pub transfer_characteristics: u8,
     pub matrix_coefficients: u8,
     pub full_range: bool,
+    pub chroma_sample_position: u8,
     /// Timestamp of the temporal unit that showed the picture ([`Decoder::decode_pts`]).
     pub pts: i64,
     /// Decoded in draft mode without deblocking / CDEF / loop restoration

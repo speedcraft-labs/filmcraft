@@ -58,6 +58,7 @@ pub(crate) struct RefFrame {
     pub mi_rows: usize,
     pub film_grain_present: bool,
     pub color: (u8, u8, u8, bool),
+    pub chroma_sample_position: u8,
     /// SavedRefFrames / SavedMvs (MfRefFrames / MfMvs of 7.19), mi units.
     pub saved_ref_frames: Vec<i8>,
     pub saved_mvs: Vec<[i32; 2]>,
@@ -786,6 +787,7 @@ fn decode_frame(job: &FrameJob, pool: &Pool, stats: &mut DecodeStats) -> Result<
         mi_rows: fs.mi.rows,
         film_grain_present: seq.film_grain_params_present,
         color: (seq.color.color_primaries, seq.color.transfer_characteristics, seq.color.matrix_coefficients, seq.color.color_range),
+        chroma_sample_position: seq.color.chroma_sample_position,
         saved_ref_frames: mf_refs,
         saved_mvs: mf_mvs,
     });
@@ -877,6 +879,7 @@ fn output_picture(seq: &SequenceHeader, rf: &RefFrame, w: usize, h: usize, grain
         transfer_characteristics: rf.color.1,
         matrix_coefficients: rf.color.2,
         full_range: rf.color.3,
+        chroma_sample_position: rf.chroma_sample_position,
         pts,
         draft: false,
     };

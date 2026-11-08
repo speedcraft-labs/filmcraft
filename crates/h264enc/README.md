@@ -54,6 +54,20 @@ for p in enc.flush() { /* ... */ }
 
 ## Verification
 
+### Cached sub-pel reference planes (#111)
+
+Each reconstructed reference picture builds its padded H, V and HV half-sample luma planes once
+in `build_hpel`; every motion-search candidate then reads those planes through `RefPic::luma_ref`.
+The search does not run the six-tap filter for each candidate. `picture/tests.rs` compares all 16
+fractional phases, block sizes, edge positions and negative motion vectors against an independent
+per-candidate six-tap implementation, including SATD costs. It also checks the direct integer-plane
+view and the public motion-compensation result. This regression test records the existing cache
+contract; it does not add a second interpolation cache or change emitted bitstreams.
+
+Run `cargo test --release -p filmcraft-h264enc --lib cached_plane_costs_match_per_candidate_interpolation`.
+The ignored `benchmark_cached_plane_costs` compares the existing cached lookup with the slow test
+oracle. It is a diagnostic kernel comparison and does not imply an encoder throughput improvement.
+
 `cargo test --release -p filmcraft-h264enc` (ffmpeg/ffprobe used only as external oracles; tests skip when
 absent). Every stream is decoded with `ffmpeg -v warning -err_detect +crccheck+bitstream+buffer+explode -f rawvideo`
 and must print nothing (not even a `corrupt decoded frame` warning), produce exactly the number of frames encoded,

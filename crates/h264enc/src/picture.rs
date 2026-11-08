@@ -311,3 +311,6 @@ pub fn avg_into(dst: &mut [u8], src: &[u8]) {
         *d = ((*d as u16 + s as u16 + 1) >> 1) as u8;
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -706,8 +706,9 @@ impl VideoFrame {
                 if matches!(self.color.transfer, filmcraft_color::Transfer::Bt709 | filmcraft_color::Transfer::Srgb) =>
             {
                 // Direct display path: Y'CbCr → R'G'B' without linearisation.
-                let Some(chroma) =
-                    ChromaUpsampler::new([&planes[1], &planes[2]], (w, h), *chroma, self.color.chroma_siting, filter).filter(|_| planes[0].len() >= pixels)
+                let Some(chroma) = ChromaUpsampler::new([&planes[1], &planes[2]], (w, h), *chroma, self.color.chroma_siting, filter)
+                    .map(|upsampler| if filter == ChromaFilter::Bilinear { upsampler.with_horizontal_cache() } else { upsampler })
+                    .filter(|_| planes[0].len() >= pixels)
                 else {
                     return vec![0; pixels * 4];
                 };

@@ -3,6 +3,7 @@
 //! axes retain their fractional bits until a single rounded integer result.
 
 use filmcraft_color::ChromaSiting;
+use rayon::prelude::*;
 
 use crate::Chroma;
 
@@ -43,6 +44,7 @@ pub struct ChromaUpsampler<'a, T> {
     vertical_shift: u32,
     vertical_phase: u32,
     horizontal: Vec<Taps>,
+    horizontal_cache: Option<Vec<[u16; 2]>>,
     filter: ChromaFilter,
 }
 
@@ -69,6 +71,7 @@ impl<'a, T: Copy + Into<u16>> ChromaUpsampler<'a, T> {
             vertical_shift,
             vertical_phase,
             horizontal: (0..width).map(|column| taps(column, chroma_width, horizontal_shift, horizontal_phase, filter)).collect(),
+            horizontal_cache: None,
             filter,
         })
     }
@@ -80,13 +83,51 @@ impl<'a, T: Copy + Into<u16>> ChromaUpsampler<'a, T> {
         let planes = self.planes.map(|plane| {
             [&plane[vertical.first * self.width..(vertical.first + 1) * self.width], &plane[vertical.second * self.width..(vertical.second + 1) * self.width]]
         });
-        ChromaRow { planes, horizontal: &self.horizontal, weight: vertical.weight }
+        let horizontal_cache = self.horizontal_cache.as_ref().map(|cache| {
+            let row_width = self.horizontal.len();
+            [&cache[vertical.first * row_width..(vertical.first + 1) * row_width], &cache[vertical.second * row_width..(vertical.second + 1) * row_width]]
+        });
+        ChromaRow { planes, horizontal: &self.horizontal, horizontal_cache, weight: vertical.weight }
+    }
+}
+
+impl<'a> ChromaUpsampler<'a, u8> {
+    /// Cache horizontally filtered 8-bit chroma rows so adjacent luma rows reuse them.
+    /// The weighted sums stay unrounded until vertical interpolation, preserving the
+    /// single-round result used by [`ChromaRow::sample`].
+    pub fn with_horizontal_cache(mut self) -> Self {
+        if self.filter != ChromaFilter::Bilinear || self.horizontal.len() == self.width {
+            return self;
+        }
+        let row_width = self.horizontal.len();
+        let Some(cache_len) = row_width.checked_mul(self.height) else { return self };
+        let mut cache = Vec::new();
+        if cache.try_reserve_exact(cache_len).is_err() {
+            return self;
+        }
+        cache.resize(cache_len, [0; 2]);
+        let planes = self.planes;
+        let taps = &self.horizontal;
+        let chroma_width = self.width;
+        cache.par_chunks_mut(row_width).enumerate().for_each(|(row, output)| {
+            let rows = planes.map(|plane| &plane[row * chroma_width..(row + 1) * chroma_width]);
+            for (column, horizontal) in taps.iter().enumerate() {
+                for channel in 0..2 {
+                    let upper = u32::from(rows[channel][horizontal.first]);
+                    let lower = u32::from(rows[channel][horizontal.second]);
+                    output[column][channel] = (upper * (4 - horizontal.weight) + lower * horizontal.weight) as u16;
+                }
+            }
+        });
+        self.horizontal_cache = Some(cache);
+        self
     }
 }
 
 pub struct ChromaRow<'a, T> {
     planes: [[&'a [T]; 2]; 2],
     horizontal: &'a [Taps],
+    horizontal_cache: Option<[&'a [[u16; 2]]; 2]>,
     weight: u32,
 }
 
@@ -94,6 +135,12 @@ impl<T: Copy + Into<u16>> ChromaRow<'_, T> {
     /// Returns Cb/Cr integer codes, rounded once after both axes and edge-clamped.
     #[inline]
     pub fn sample(&self, column: usize) -> [u32; 2] {
+        if let Some(rows) = self.horizontal_cache {
+            let column = column.min(self.horizontal.len() - 1);
+            let upper = rows[0][column];
+            let lower = rows[1][column];
+            return std::array::from_fn(|channel| (u32::from(upper[channel]) * (4 - self.weight) + u32::from(lower[channel]) * self.weight + 8) >> 4);
+        }
         let horizontal = self.horizontal[column.min(self.horizontal.len() - 1)];
         self.planes.map(|rows| {
             let interpolate =

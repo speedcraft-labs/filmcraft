@@ -43,7 +43,8 @@ fn make(ff: &std::path::Path, name: &str, args: &str, pix: &str) -> Option<Vec<V
         let a: Vec<&str> = args.split_whitespace().collect();
         matches!(
             Command::new(ff)
-                .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=64x48:rate=25", "-frames:v", "6", "-pix_fmt", pix])
+                // SVT-AV1 rejects heights below 64 even though ffmpeg lists the encoder.
+                .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=25", "-frames:v", "6", "-pix_fmt", pix])
                 .args(a)
                 .args(["-f", "ivf"])
                 .arg(tmp)

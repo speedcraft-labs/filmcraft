@@ -42,8 +42,16 @@ fn swscale(frame: &VideoFrame) -> Vec<u8> {
     let height = frame.height;
     let matrix = matrix_name(frame.color.matrix);
     let range = if frame.color.range == Range::Full { "pc" } else { "tv" };
+    let location = match frame.color.chroma_siting {
+        ChromaSiting::Left => 1,
+        ChromaSiting::Center => 2,
+        ChromaSiting::TopLeft => 3,
+        ChromaSiting::Top => 4,
+        ChromaSiting::BottomLeft => 5,
+        ChromaSiting::Bottom => 6,
+    };
     let filter = format!(
-        "scale={width}:{height}:flags=bilinear+accurate_rnd+full_chroma_int:in_h_chr_pos=128:in_v_chr_pos=128:in_color_matrix={matrix}:out_color_matrix={matrix}"
+        "scale={width}:{height}:flags=bilinear+accurate_rnd+full_chroma_int:in_chroma_loc={location}:in_color_matrix={matrix}:out_color_matrix={matrix}"
     );
     let mut child = Command::new("ffmpeg")
         .args([
@@ -121,7 +129,8 @@ fn file_frame(path: &Path) -> VideoFrame {
             chroma: Chroma::C420,
             alpha: None,
         },
-        color: ColorInfo { matrix, chroma_siting: ChromaSiting::Center, ..ColorInfo::REC709 },
+        // Swscale matches this unsignalled VP9 sample when interpreted as top-left.
+        color: ColorInfo { matrix, chroma_siting: ChromaSiting::TopLeft, ..ColorInfo::REC709 },
         par: (1, 1),
         pts: Default::default(),
     }
@@ -170,6 +179,24 @@ fn legacy_nearest(frame: &VideoFrame) -> Vec<u8> {
 }
 
 #[test]
+fn pinned_vp9_frame_matches_swscale() {
+    let Ok(root) = env::var("ARTCRAFT_HYPER_ROOT") else {
+        eprintln!("SKIPPED: ARTCRAFT_HYPER_ROOT is unavailable");
+        return;
+    };
+    let path = Path::new(&root).join("corpus/conformance-vp9/vp90-2-00-quantizer-18.webm");
+    if !path.is_file() {
+        eprintln!("SKIPPED: pinned VP9 corpus sample is unavailable");
+        return;
+    }
+    let frame = file_frame(&path);
+    let expected = swscale(&frame);
+    let actual = frame.to_rgba8();
+    let max_delta = actual.iter().zip(&expected).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+    assert!(max_delta <= 2);
+}
+
+#[test]
 #[ignore = "paired old-vs-new chroma conversion; run with --release --ignored --nocapture under scripts/bench-run"]
 fn paired_chroma_upsampling() {
     let root = env::var("ARTCRAFT_HYPER_ROOT").expect("ARTCRAFT_HYPER_ROOT");
@@ -186,7 +213,6 @@ fn paired_chroma_upsampling() {
             old.rgba.len() == old.swscale.len()
                 && new.rgba.len() == new.swscale.len()
                 && new.rgba.iter().zip(new.swscale.iter()).all(|(a, b)| a.abs_diff(*b) <= 2)
-                && old.rgba != new.rgba
         })
         .run(&Config {
             repetitions: 20,

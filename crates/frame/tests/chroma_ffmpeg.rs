@@ -34,7 +34,7 @@ fn centered_420_matches_ffmpeg_swscale_bilinear() {
             "-frames:v",
             "1",
             "-vf",
-            "scale=8:8:flags=bilinear+accurate_rnd+full_chroma_int:in_h_chr_pos=128:in_v_chr_pos=128:in_color_matrix=bt709:out_color_matrix=bt709",
+            "scale=8:8:flags=bilinear+accurate_rnd+full_chroma_int:in_chroma_loc=2:in_color_matrix=bt709:out_color_matrix=bt709",
             "-pix_fmt",
             "rgba",
             "-f",

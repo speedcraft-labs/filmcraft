@@ -16,4 +16,5 @@ rayon = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
+craft-bench = { git = "https://github.com/speedcraft-labs/craft-libs", rev = "0fda0983d08f15578814a660065b5e37e30dce37" }
 proptest = { workspace = true }

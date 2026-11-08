@@ -692,6 +692,12 @@ impl VideoFrame {
 
     /// Convert to straight-alpha sRGB RGBA8 for display (fast paths for 8-bit sources).
     pub fn to_rgba8(&self) -> Vec<u8> {
+        self.to_rgba8_with_filter(ChromaFilter::Bilinear)
+    }
+
+    /// Convert to straight-alpha sRGB RGBA8 with an explicit chroma filter.
+    /// Nearest is retained for callers that deliberately need legacy sampling.
+    pub fn to_rgba8_with_filter(&self, filter: ChromaFilter) -> Vec<u8> {
         let (w, h) = (self.width as usize, self.height as usize);
         let Some(pixels) = w.checked_mul(h).filter(|&pixels| pixels > 0 && pixels <= 1 << 28) else { return Vec::new() };
         match &self.data {
@@ -700,8 +706,8 @@ impl VideoFrame {
                 if matches!(self.color.transfer, filmcraft_color::Transfer::Bt709 | filmcraft_color::Transfer::Srgb) =>
             {
                 // Direct display path: Y'CbCr → R'G'B' without linearisation.
-                let Some(chroma) = ChromaUpsampler::new([&planes[1], &planes[2]], (w, h), *chroma, self.color.chroma_siting, ChromaFilter::Bilinear)
-                    .filter(|_| planes[0].len() >= pixels)
+                let Some(chroma) =
+                    ChromaUpsampler::new([&planes[1], &planes[2]], (w, h), *chroma, self.color.chroma_siting, filter).filter(|_| planes[0].len() >= pixels)
                 else {
                     return vec![0; pixels * 4];
                 };

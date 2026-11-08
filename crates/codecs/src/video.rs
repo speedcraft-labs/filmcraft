@@ -264,11 +264,26 @@ pub fn mjpeg_factory(e: &SampleEntry) -> Option<Result<Box<dyn VideoDecoder>>> {
     matches!(e.codec, CodecConfig::Jpeg { .. }).then(|| Ok(Box::new(MjpegDecoder) as Box<dyn VideoDecoder>))
 }
 
+fn h264_chroma_siting_annexb(sample: &[u8]) -> Option<filmcraft_color::ChromaSiting> {
+    let nal = filmcraft_bitstream::annexb_nals(sample).into_iter().find(|n| n.first().is_some_and(|h| h & 0x1f == 7))?;
+    let sps = filmcraft_h264::params::Sps::parse(&filmcraft_bitstream::unescape_rbsp(nal.get(1..)?)).ok()?;
+    let location = sps.vui.unwrap_or_default().chroma_loc.map_or(0, |value| value.0);
+    Some(filmcraft_color::ChromaSiting::from_h26x(location).unwrap_or_default())
+}
+
+fn hevc_chroma_siting_annexb(sample: &[u8]) -> Option<filmcraft_color::ChromaSiting> {
+    let nal = filmcraft_bitstream::annexb_nals(sample).into_iter().find(|n| n.first().is_some_and(|h| (h >> 1) & 0x3f == 33))?;
+    let sps = filmcraft_hevc::params::Sps::parse(&filmcraft_bitstream::unescape_rbsp(nal.get(2..)?)).ok()?;
+    let location = sps.vui.unwrap_or_default().chroma_loc.map_or(0, |value| value.0);
+    Some(filmcraft_color::ChromaSiting::from_h26x(location).unwrap_or_default())
+}
+
 /// Our pure-Rust H.264 decoder (frame-threaded).
 pub struct H264Decoder {
     avcc: Vec<u8>,
     dec: filmcraft_h264::Decoder,
     length_size: usize,
+    chroma_siting: filmcraft_color::ChromaSiting,
     draft: bool,
     /// Worker threads (a background decoder gets fewer).
     threads: usize,
@@ -293,15 +308,16 @@ impl H264Decoder {
         let threads = Self::threads_now();
         let dec = Self::make_inner(&avcc, threads)?;
         let length_size = avcc_length_size(&avcc);
-        Ok(Self { avcc, dec, length_size, draft: false, threads })
+        let chroma_siting = super::hw::NalStreamInfo::from_avcc(&avcc).map(|info| info.color.chroma_siting).unwrap_or_default();
+        Ok(Self { avcc, dec, length_size, chroma_siting, draft: false, threads })
     }
     /// A decoder for Annex B byte-stream samples (start codes, in-band parameter sets: MXF, TS).
     pub fn annexb() -> Self {
         recycle_h264_planes();
         let threads = Self::threads_now();
-        Self { avcc: Vec::new(), dec: filmcraft_h264::Decoder::with_threads(threads), length_size: 0, draft: false, threads }
+        Self { avcc: Vec::new(), dec: filmcraft_h264::Decoder::with_threads(threads), length_size: 0, chroma_siting: Default::default(), draft: false, threads }
     }
-    fn convert(p: filmcraft_h264::Picture) -> DecodedFrame {
+    fn convert(p: filmcraft_h264::Picture, chroma_siting: filmcraft_color::ChromaSiting) -> DecodedFrame {
         use std::sync::Arc;
         let draft = p.draft;
         let (w, h) = (p.width as usize, p.height as usize);
@@ -310,7 +326,7 @@ impl H264Decoder {
         let u = tight_plane(p.u, p.uv_stride, cw, ch);
         let v = tight_plane(p.v, p.uv_stride, cw, ch);
         let mut color = vui_color(p.width, p.height, p.color.primaries, p.color.matrix, p.color.transfer, p.color.full_range);
-        color.chroma_siting = filmcraft_color::ChromaSiting::from_h26x(p.color.chroma_location).unwrap_or_default();
+        color.chroma_siting = chroma_siting;
         let par = sar_par(p.sar);
         let frame = VideoFrame {
             width: p.width,
@@ -336,16 +352,23 @@ fn h264_error(e: filmcraft_h264::Error) -> CodecError {
 
 impl VideoDecoder for H264Decoder {
     fn decode(&mut self, sample: &[u8], pts: i64) -> Result<Vec<DecodedFrame>> {
+        if self.length_size == 0
+            && let Some(siting) = h264_chroma_siting_annexb(sample)
+        {
+            self.chroma_siting = siting;
+        }
         let pics = self.dec.decode(sample, pts).map_err(h264_error)?;
-        Ok(pics.into_iter().map(Self::convert).collect())
+        Ok(pics.into_iter().map(|p| Self::convert(p, self.chroma_siting)).collect())
     }
     fn flush(&mut self) -> Vec<DecodedFrame> {
-        self.dec.flush().into_iter().map(Self::convert).collect()
+        self.dec.flush().into_iter().map(|p| Self::convert(p, self.chroma_siting)).collect()
     }
     fn reset(&mut self) {
         self.dec.reset();
         if !self.avcc.is_empty() {
             let _ = self.dec.configure_avcc(&self.avcc);
+        } else {
+            self.chroma_siting = Default::default();
         }
     }
     fn name(&self) -> &str {
@@ -402,19 +425,21 @@ pub struct HevcDecoder {
     dec: filmcraft_hevc::Decoder,
     length_size: usize,
     highest_tid: Option<u8>,
+    chroma_siting: filmcraft_color::ChromaSiting,
 }
 
 impl HevcDecoder {
     pub fn new(hvcc: Vec<u8>) -> Result<Self> {
         let dec = filmcraft_hevc::Decoder::from_hvcc(&hvcc).map_err(hevc_error)?;
         let (length_size, highest_tid) = hvcc_length_size_and_tid(&hvcc);
-        Ok(Self { hvcc, dec, length_size, highest_tid })
+        let chroma_siting = super::hw::NalStreamInfo::from_hvcc(&hvcc).map(|info| info.color.chroma_siting).unwrap_or_default();
+        Ok(Self { hvcc, dec, length_size, highest_tid, chroma_siting })
     }
     /// A decoder for Annex B byte-stream samples (start codes, in-band parameter sets: TS).
     pub fn annexb() -> Self {
-        Self { hvcc: Vec::new(), dec: filmcraft_hevc::Decoder::new(), length_size: 0, highest_tid: None }
+        Self { hvcc: Vec::new(), dec: filmcraft_hevc::Decoder::new(), length_size: 0, highest_tid: None, chroma_siting: Default::default() }
     }
-    fn convert(p: filmcraft_hevc::Picture) -> DecodedFrame {
+    fn convert(p: filmcraft_hevc::Picture, chroma_siting: filmcraft_color::ChromaSiting) -> DecodedFrame {
         use filmcraft_hevc::Plane;
         use std::sync::Arc;
         let (w, h) = (p.width as usize, p.height as usize);
@@ -440,7 +465,7 @@ impl HevcDecoder {
             },
         };
         let mut color = vui_color(p.width, p.height, p.color.primaries, p.color.matrix, p.color.transfer, p.color.full_range);
-        color.chroma_siting = filmcraft_color::ChromaSiting::from_h26x(p.color.chroma_location).unwrap_or_default();
+        color.chroma_siting = chroma_siting;
         let par = sar_par(p.sar);
         let frame = VideoFrame { width: p.width, height: p.height, data, color, par, pts: filmcraft_time::Tick::ZERO };
         DecodedFrame { pts: p.pts, frame, draft: p.draft }
@@ -457,15 +482,21 @@ fn hevc_error(e: filmcraft_hevc::Error) -> CodecError {
 
 impl VideoDecoder for HevcDecoder {
     fn decode(&mut self, sample: &[u8], pts: i64) -> Result<Vec<DecodedFrame>> {
+        if self.length_size == 0
+            && let Some(siting) = hevc_chroma_siting_annexb(sample)
+        {
+            self.chroma_siting = siting;
+        }
         let pics = self.dec.decode(sample, pts).map_err(hevc_error)?;
-        Ok(pics.into_iter().map(Self::convert).collect())
+        Ok(pics.into_iter().map(|p| Self::convert(p, self.chroma_siting)).collect())
     }
     fn flush(&mut self) -> Vec<DecodedFrame> {
-        self.dec.flush().into_iter().map(Self::convert).collect()
+        self.dec.flush().into_iter().map(|p| Self::convert(p, self.chroma_siting)).collect()
     }
     fn reset(&mut self) {
         if self.hvcc.is_empty() {
             self.dec = filmcraft_hevc::Decoder::new();
+            self.chroma_siting = Default::default();
         } else if let Ok(d) = filmcraft_hevc::Decoder::from_hvcc(&self.hvcc) {
             self.dec = d;
         }

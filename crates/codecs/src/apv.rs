@@ -79,6 +79,7 @@ impl ApvSource {
             transfer: fh.color.transfer,
             matrix: fh.color.matrix,
             full_range: Some(fh.color.full_range),
+            chroma_siting: None,
         });
         let assumed = crate::stream_color::assumed(codes.as_slice());
         if fh.color_description_present {

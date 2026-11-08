@@ -5,6 +5,7 @@
 //! (so ½/¼ playback resolution renders the same look). Colour-grading math runs on display-encoded
 //! straight colour where artists expect it (contrast, levels, posterize), linear light elsewhere.
 
+use craft_blur::{MedianEdge, median_ranked_square, select_nth};
 use filmcraft_color::{GradeSpace, hsl_to_rgb, linear_to_srgb, luma709, rgb_to_hsl, srgb_to_linear};
 use filmcraft_geom::{Affine, Vec2};
 use filmcraft_project::{EffectInstance, ParamValue};
@@ -900,23 +901,64 @@ pub(crate) fn directional_taps(img: &mut Image, dx: f32, dy: f32, steps: usize) 
 }
 
 pub(crate) fn median(img: &mut Image, r: isize) {
-    let src = img.clone();
-    let w = img.w;
-    img.px.par_chunks_mut(w * 4).enumerate().for_each_init(Vec::new, |buf: &mut Vec<f32>, (y, row)| {
-        for x in 0..w {
-            for k in 0..4 {
-                buf.clear();
-                for dy in -r..=r {
-                    for dx in -r..=r {
-                        buf.push(src.get_clamped(x as isize + dx, y as isize + dy)[k]);
+    let (w, h) = (img.w, img.h);
+    if r <= 0 || w == 0 || h == 0 {
+        return;
+    }
+    let src = img.px.clone();
+    for channel in 0..4 {
+        let plane: Vec<f32> = src.as_chunks::<4>().0.iter().map(|px| px[channel]).collect();
+        let filtered = if r >= 4 { median_ranked_plane(&plane, w, h, r as usize, MedianEdge::Clamp) } else { None }
+            .unwrap_or_else(|| median_select_plane(&plane, w, h, r as usize, MedianEdge::Clamp));
+        for (px, value) in img.px.as_chunks_mut::<4>().0.iter_mut().zip(filtered) {
+            px[channel] = value;
+        }
+    }
+}
+
+fn median_ranked_plane(src: &[f32], w: usize, h: usize, r: usize, edge: MedianEdge) -> Option<Vec<f32>> {
+    let mut levels = src.to_vec();
+    levels.sort_unstable_by(f32::total_cmp);
+    levels.dedup_by(|a, b| a.total_cmp(b).is_eq());
+    if levels.len() > u32::MAX as usize {
+        return None;
+    }
+    let ranks: Vec<u32> = src.iter().map(|value| levels.partition_point(|sample| sample.total_cmp(value).is_lt()) as u32).collect();
+    let selected = median_ranked_square(&ranks, w, h, r, levels.len(), edge).ok()?;
+    Some(selected.into_iter().map(|rank| levels[rank as usize]).collect())
+}
+
+fn median_select_plane(src: &[f32], w: usize, h: usize, r: usize, edge: MedianEdge) -> Vec<f32> {
+    let mut out = vec![0.0; src.len()];
+    if w == 0 || h == 0 {
+        return out;
+    }
+    out.par_chunks_mut(w).enumerate().for_each_init(Vec::new, |window: &mut Vec<f32>, (y, row)| {
+        for (x, output) in row.iter_mut().enumerate() {
+            window.clear();
+            match edge {
+                MedianEdge::Clamp => {
+                    for dy in -(r as isize)..=r as isize {
+                        let sy = (y as isize + dy).clamp(0, h as isize - 1) as usize;
+                        for dx in -(r as isize)..=r as isize {
+                            let sx = (x as isize + dx).clamp(0, w as isize - 1) as usize;
+                            window.push(src[sy * w + sx]);
+                        }
                     }
                 }
-                let mid = buf.len() / 2;
-                buf.select_nth_unstable_by(mid, |a, b| a.total_cmp(b));
-                row[x * 4 + k] = buf[mid];
+                MedianEdge::Truncate => {
+                    for sy in y.saturating_sub(r)..(y + r + 1).min(h) {
+                        let start = x.saturating_sub(r);
+                        let end = (x + r + 1).min(w);
+                        window.extend_from_slice(&src[sy * w + start..sy * w + end]);
+                    }
+                }
             }
+            let rank = window.len() / 2;
+            *output = select_nth(window, rank, f32::total_cmp).unwrap_or_default();
         }
     });
+    out
 }
 
 pub(crate) fn mosaic(img: &mut Image, bx: usize, by: usize) {
@@ -953,6 +995,109 @@ mod tests {
 
     use super::*;
     use filmcraft_project::find_effect;
+
+    fn brute_square(src: &[f32], w: usize, h: usize, r: usize, x: usize, y: usize, c: usize) -> f32 {
+        let mut values = Vec::new();
+        for dy in -(r as isize)..=r as isize {
+            let sy = (y as isize + dy).clamp(0, h as isize - 1) as usize;
+            for dx in -(r as isize)..=r as isize {
+                let sx = (x as isize + dx).clamp(0, w as isize - 1) as usize;
+                values.push(src[(sy * w + sx) * 4 + c]);
+            }
+        }
+        values.sort_by(f32::total_cmp);
+        values[values.len() / 2]
+    }
+
+    #[test]
+    fn median_histogram_is_bit_exact_to_selection_on_random_floats() {
+        let (w, h) = (9usize, 7usize);
+        let mut img = Image::new(w, h);
+        let mut seed = 0x9e37_79b9u32;
+        for (i, value) in img.px.iter_mut().enumerate() {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            *value = if i % 7 == 0 { (seed % 5) as f32 * 0.25 } else { (seed as i32 % 2048) as f32 / 257.0 };
+        }
+        img.px[3] = -0.0;
+        img.px[4] = 0.0;
+        img.px[5] = f32::from_bits(0x7fc0_0001);
+        let src = img.px.clone();
+        for r in [1usize, 2, 4, 7] {
+            let mut got = img.clone();
+            median(&mut got, r as isize);
+            for y in 0..h {
+                for x in 0..w {
+                    for c in 0..4 {
+                        let want = brute_square(&src, w, h, r, x, y, c);
+                        assert_eq!(got.px[(y * w + x) * 4 + c].to_bits(), want.to_bits(), "r={r} ({x},{y}) c={c}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hsl_mask_median_keeps_truncated_border_windows() {
+        let (w, h) = (8usize, 6usize);
+        let mut seed = 0xa341_316cu32;
+        let src: Vec<f32> = (0..w * h)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (seed % 1009) as f32 / 1008.0
+            })
+            .collect();
+        for r in [1usize, 2, 4] {
+            let got = median_filter(&src, w, h, r);
+            for y in 0..h {
+                for x in 0..w {
+                    let mut values = Vec::new();
+                    for sy in y.saturating_sub(r)..(y + r + 1).min(h) {
+                        let left = x.saturating_sub(r);
+                        let right = (x + r + 1).min(w);
+                        values.extend_from_slice(&src[sy * w + left..sy * w + right]);
+                    }
+                    values.sort_by(f32::total_cmp);
+                    assert_eq!(got[y * w + x].to_bits(), values[values.len() / 2].to_bits(), "r={r} ({x},{y})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn median_matches_brute_force_on_a_pinned_corpus_image_when_available() {
+        let Some(root) = std::env::var_os("ARTCRAFT_CORPUS") else { return };
+        for fixture in ["basn6a08.png", "basn6a16.png"] {
+            let path = std::path::PathBuf::from(&root).join("pngsuite").join(fixture);
+            assert!(path.exists(), "missing corpus fixture {path:?}");
+            let decoded = image::open(&path);
+            assert!(decoded.is_ok(), "could not decode corpus fixture {path:?}");
+            let Ok(decoded) = decoded else { return };
+            let rgba = decoded.to_rgba32f();
+            let (w, h) = (rgba.width() as usize, rgba.height() as usize);
+            let mut img = Image::new(w, h);
+            for (dst, pixel) in img.px.as_chunks_mut::<4>().0.iter_mut().zip(rgba.pixels()) {
+                dst.copy_from_slice(&pixel.0);
+            }
+            let src = img.px.clone();
+            for r in [1usize, 4] {
+                let mut got = img.clone();
+                median(&mut got, r as isize);
+                for y in 0..h {
+                    for x in 0..w {
+                        for c in 0..4 {
+                            assert_eq!(
+                                got.px[(y * w + x) * 4 + c].to_bits(),
+                                brute_square(&src, w, h, r, x, y, c).to_bits(),
+                                "{fixture} r={r} ({x},{y}) c={c}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     fn cx() -> FxCtx<'static> {
         FxCtx {
@@ -1537,7 +1682,7 @@ fn median_filter(src: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
                 win.extend_from_slice(&line[x.saturating_sub(r)..(x + r + 1).min(w)]);
             }
             let k = win.len() / 2;
-            *o = *win.select_nth_unstable_by(k, |a, b| a.total_cmp(b)).1;
+            *o = select_nth(&mut win, k, f32::total_cmp).unwrap_or_default();
         }
     });
     out

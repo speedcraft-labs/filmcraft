@@ -19,12 +19,12 @@ concurrency:
 
 jobs:
   git-sources:
-    name: Git dependencies come from storytold
+    name: Git dependencies use approved Craft sources
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Git dependencies come from storytold
+      - name: Git dependencies use approved Craft sources
         run: |
           set -euo pipefail
           test -f Cargo.lock || { echo "Cargo.lock is missing"; exit 1; }
@@ -48,11 +48,15 @@ jobs:
           python3 - <<'PY'
           import sys, tomllib
           lock = tomllib.load(open("Cargo.lock", "rb"))
+          # The fork carries shared crates before they are available in the upstream repository.
+          def approved(source):
+              return (source.startswith("git+https://github.com/storytold/") or
+                      source.startswith("git+https://github.com/speedcraft-labs/craft-libs?"))
           bad = sorted({p["source"] for p in lock.get("package", [])
                         if p.get("source", "").startswith("git+")
-                        and not p["source"].startswith("git+https://github.com/storytold/")})
+                        and not approved(p["source"])})
           if bad:
-              print("Git dependencies outside github.com/storytold:", *bad, sep="\n")
+              print("Git dependencies outside approved Craft repositories:", *bad, sep="\n")
               sys.exit(1)
           PY
 

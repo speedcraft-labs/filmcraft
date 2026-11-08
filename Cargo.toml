@@ -11,7 +11,8 @@ rust-version = "1.95"
 repository = "https://github.com/storytold/filmcraft"
 
 [workspace.dependencies]
-craft-resample = { git = "https://github.com/storytold/craft-libs", rev = "fd21a0a80a8e4f4c183a8e0da0953e1b033b817d", features = ["rayon"] }
+craft-blur = { package = "craft-blur", git = "https://github.com/speedcraft-labs/craft-libs", rev = "f0507f3d4512dfc880388a4b9687e411a27e0b35" }
+craft-resample = { git = "https://github.com/speedcraft-labs/craft-libs", rev = "5b39be1932c66dc5d72064d9a0680a7e57ef388f", features = ["rayon"] }
 # internal
 filmcraft-time = { path = "crates/time" }
 filmcraft-geom = { path = "crates/geom" }
@@ -27,8 +28,8 @@ filmcraft-mpeg2v = { path = "crates/mpeg2v" }
 filmcraft-ac3 = { path = "crates/ac3" }
 filmcraft-mpa = { path = "crates/mpa" }
 filmcraft-ogg = { path = "crates/ogg" }
-filmcraft-h264 = { package = "craft-h264", git = "https://github.com/storytold/craft-libs", rev = "20cc6894fc3acf56042ab2b5144642ead4e487bd" }
-filmcraft-hevc = { package = "craft-hevc", git = "https://github.com/storytold/craft-libs", rev = "20cc6894fc3acf56042ab2b5144642ead4e487bd" }
+filmcraft-h264 = { package = "craft-h264", git = "https://github.com/speedcraft-labs/craft-libs", rev = "6ce8f65177fe2e48e62166e8502aac19a44ca90e" }
+filmcraft-hevc = { package = "craft-hevc", git = "https://github.com/speedcraft-labs/craft-libs", rev = "6ce8f65177fe2e48e62166e8502aac19a44ca90e" }
 filmcraft-vp8 = { path = "crates/vp8" }
 filmcraft-vp9 = { path = "crates/vp9" }
 filmcraft-prores = { path = "crates/prores" }
@@ -74,12 +75,12 @@ chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 rayon = "1"
 proptest = "1"
 roxmltree = "0.21"
-craft-docpath = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "c5a1cbfb5f9049f9270955caffb5bee5997aebf7" }
-craft-media = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "c5a1cbfb5f9049f9270955caffb5bee5997aebf7", default-features = false }
+craft-docpath = { version = "0.1.0", git = "https://github.com/speedcraft-labs/craft-libs", rev = "6ce8f65177fe2e48e62166e8502aac19a44ca90e" }
+craft-media = { version = "0.1.0", git = "https://github.com/speedcraft-labs/craft-libs", rev = "6ce8f65177fe2e48e62166e8502aac19a44ca90e", default-features = false }
 
 # ui
 # Shared frontend components; keep this dependency above the engine boundary.
-craft-ui = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "c5a1cbfb5f9049f9270955caffb5bee5997aebf7", features = ["serde", "native-windows"] }
+craft-ui = { version = "0.1.0", git = "https://github.com/speedcraft-labs/craft-libs", rev = "6ce8f65177fe2e48e62166e8502aac19a44ca90e", features = ["serde", "native-windows"] }
 # egui 0.37: bundled fonts are opt-in, and the monochrome symbol/emoji faces moved to their own
 # feature. FilmCraft paints ✔ ✓ ✖ ⚡ ⚠ ⚙ ♪ ☑ in panel chrome, so both features are part of the
 # production font policy (system_fonts stays off).
@@ -89,7 +90,7 @@ egui_extras = { version = "0.37", default-features = false }
 eframe = { version = "0.37", default-features = false }
 egui_kittest = "0.37"
 # craft-update: app-specific pretend versions apply to startup and manual checks.
-craft-update = { git = "https://github.com/storytold/craft-libs", version = "=0.1.0", rev = "c5a1cbfb5f9049f9270955caffb5bee5997aebf7", features = ["egui"] }
+craft-update = { git = "https://github.com/speedcraft-labs/craft-libs", version = "=0.1.0", rev = "6ce8f65177fe2e48e62166e8502aac19a44ca90e", features = ["egui"] }
 rfd = "0.17"
 
 [workspace.lints.rust]

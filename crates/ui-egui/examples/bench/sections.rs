@@ -323,28 +323,40 @@ pub fn big_sequence(s: &mut Session, item: ItemId, name: &str, seed: u64) -> (It
     .expect("big sequence")
 }
 
-/// One ordinary 1080p source clip with its embedded audio on the timeline. The real-world
-/// #291 adapter sets `FILMCRAFT_TIMELINE_MEDIA` so timeline painting uses the same file as
-/// playback and export rather than the synthetic 1000-clip stress fixture.
+/// Eight contiguous cuts from one ordinary 1080p source, with its embedded soundtrack aligned
+/// underneath. The real-world #291 adapter sets `FILMCRAFT_TIMELINE_MEDIA` so timeline painting
+/// uses the same file as playback and export rather than the synthetic 1000-clip stress fixture.
 fn real_world_sequence(s: &mut Session, item: ItemId) -> (ItemId, usize) {
     let media = s.project.item(item).and_then(|it| it.as_media()).expect("real-world timeline source is media");
     assert!(!media.info.audio_streams.is_empty(), "real-world timeline source must carry audio");
     let duration = media.info.duration;
     let (width, height) = media.info.video.as_ref().map(|v| (v.width, v.height)).unwrap_or((1920, 1080));
     let rate = FrameRate::FPS_23_976;
-    let range = TimeRange::new(Tick::ZERO, rate.snap_nearest(duration));
+    let total_frames = rate.frame_at(rate.snap_nearest(duration));
+    const CUTS: i64 = 8;
+    assert!(total_frames >= CUTS, "real-world source must be long enough for eight timeline regions");
     s.edit("real-world timeline", |p: &mut Project, st| {
         let settings = SequenceSettings { width, height, frame_rate: rate, ..SequenceSettings::default() };
         let seq = p.new_sequence("Real-world music video", settings, 1, 1, None);
-        let video = p.make_track_item(item, TrackKind::Video, Tick::ZERO, range, rate).expect("video clip");
-        let audio = p.make_track_item(item, TrackKind::Audio, Tick::ZERO, range, rate).expect("audio clip");
+        let mut video_regions = Vec::with_capacity(CUTS as usize);
+        let mut audio_regions = Vec::with_capacity(CUTS as usize);
+        for cut in 0..CUTS {
+            let start_frame = total_frames * cut / CUTS;
+            let end_frame = total_frames * (cut + 1) / CUTS;
+            let source_range = TimeRange::from_bounds(rate.tick_of(start_frame), rate.tick_of(end_frame));
+            let position = source_range.start;
+            let video = p.make_track_item(item, TrackKind::Video, position, source_range, rate).expect("video region");
+            let audio = p.make_track_item(item, TrackKind::Audio, position, source_range, rate).expect("audio region");
+            video_regions.push(video);
+            audio_regions.push(audio);
+        }
         let q = p.sequence_mut(seq).expect("real-world sequence");
-        q.video_tracks[0].items.push(video);
-        q.audio_tracks[0].items.push(audio);
+        q.video_tracks[0].items.extend(video_regions);
+        q.audio_tracks[0].items.extend(audio_regions);
         st.active_sequence = Some(seq);
         st.open_sequences = vec![seq];
         st.playheads.insert(seq, Tick::ZERO);
-        Ok((seq, 2))
+        Ok((seq, (CUTS * 2) as usize))
     })
     .expect("real-world sequence")
 }

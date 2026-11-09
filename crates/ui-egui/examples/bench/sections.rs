@@ -323,6 +323,32 @@ pub fn big_sequence(s: &mut Session, item: ItemId, name: &str, seed: u64) -> (It
     .expect("big sequence")
 }
 
+/// One ordinary 1080p source clip with its embedded audio on the timeline. The real-world
+/// #291 adapter sets `FILMCRAFT_TIMELINE_MEDIA` so timeline painting uses the same file as
+/// playback and export rather than the synthetic 1000-clip stress fixture.
+fn real_world_sequence(s: &mut Session, item: ItemId) -> (ItemId, usize) {
+    let media = s.project.item(item).and_then(|it| it.as_media()).expect("real-world timeline source is media");
+    assert!(!media.info.audio_streams.is_empty(), "real-world timeline source must carry audio");
+    let duration = media.info.duration;
+    let (width, height) = media.info.video.as_ref().map(|v| (v.width, v.height)).unwrap_or((1920, 1080));
+    let rate = FrameRate::FPS_23_976;
+    let range = TimeRange::new(Tick::ZERO, rate.snap_nearest(duration));
+    s.edit("real-world timeline", |p: &mut Project, st| {
+        let settings = SequenceSettings { width, height, frame_rate: rate, ..SequenceSettings::default() };
+        let seq = p.new_sequence("Real-world music video", settings, 1, 1, None);
+        let video = p.make_track_item(item, TrackKind::Video, Tick::ZERO, range, rate).expect("video clip");
+        let audio = p.make_track_item(item, TrackKind::Audio, Tick::ZERO, range, rate).expect("audio clip");
+        let q = p.sequence_mut(seq).expect("real-world sequence");
+        q.video_tracks[0].items.push(video);
+        q.audio_tracks[0].items.push(audio);
+        st.active_sequence = Some(seq);
+        st.open_sequences = vec![seq];
+        st.playheads.insert(seq, Tick::ZERO);
+        Ok((seq, 2))
+    })
+    .expect("real-world sequence")
+}
+
 // ------------------------------------------------------------------------------------ timeline UI
 
 struct Ui {
@@ -356,7 +382,9 @@ impl Ui {
 /// `egui_kittest` (no window), per frame: app update (layout + painting), tessellation, and the
 /// wgpu render of the frame when a GPU adapter exists.
 pub fn timeline(o: &Opts) -> Vec<Value> {
-    let Some(path) = fixture("clip360.mp4") else {
+    let real_world_path = std::env::var_os("FILMCRAFT_TIMELINE_MEDIA").map(std::path::PathBuf::from);
+    let real_world = real_world_path.is_some();
+    let Some(path) = real_world_path.or_else(|| fixture("clip360.mp4")) else {
         eprintln!("timeline: skipped (fixture unavailable)");
         return Vec::new();
     };
@@ -366,7 +394,7 @@ pub fn timeline(o: &Opts) -> Vec<Value> {
     for _ in 0..o.repeat {
         let mut s = Session::default();
         let item = playback::import(&mut s, &path);
-        let (_, clips) = big_sequence(&mut s, item, "Timeline 1000", 7);
+        let (_, clips) = if real_world { real_world_sequence(&mut s, item) } else { big_sequence(&mut s, item, "Timeline 1000", 7) };
         let (tx, rx) = std::sync::mpsc::channel();
         let app = filmcraft_ui_egui::FilmcraftApp::new(s).with_control(rx);
         let mut b = egui_kittest::Harness::builder().with_size(egui::vec2(1920.0, 1080.0)).with_max_steps(100_000);
@@ -379,14 +407,32 @@ pub fn timeline(o: &Opts) -> Vec<Value> {
             ui.frame();
         }
         ui.call("ui.set", json!({"timeline": {"videoTrackHeight": 34, "audioTrackHeight": 30}}));
-        for (view, setup) in
-            [("fit: all 1000 clips", json!({"timeline": {"fit": true}})), ("zoomed, scrolling", json!({"timeline": {"pps": 120.0, "scroll": 0.0}}))]
-        {
+        let views = if real_world {
+            vec![("fit: 60s real clip", json!({"timeline": {"fit": true}})), ("zoomed, scrolling", json!({"timeline": {"pps": 120.0, "scroll": 0.0}}))]
+        } else {
+            vec![("fit: all 1000 clips", json!({"timeline": {"fit": true}})), ("zoomed, scrolling", json!({"timeline": {"pps": 120.0, "scroll": 0.0}}))]
+        };
+        for (view, setup) in views {
             ui.call("ui.set", setup);
             // settle the zoom animation, let thumbnails and waveforms arrive
             let t_settle = Instant::now();
-            while t_settle.elapsed() < Duration::from_millis(if o.quick { 800 } else { 2500 }) {
+            let min_settle = Duration::from_millis(if o.quick { 800 } else { 2500 });
+            let max_settle = Duration::from_secs(if real_world { 6 } else { 30 });
+            let mut waveform_streams = 0usize;
+            let mut waveform_buckets = 0usize;
+            while t_settle.elapsed() < min_settle || (real_world && (waveform_streams == 0 || waveform_buckets == 0)) {
                 ui.frame();
+                if real_world {
+                    let peaks = ui.harness.state_mut().ui.timeline.peaks.lock().expect("waveform cache lock");
+                    waveform_streams = peaks.len();
+                    waveform_buckets = peaks.values().map(|p| p.len()).sum();
+                    if waveform_streams > 0 && waveform_buckets > 0 && t_settle.elapsed() >= min_settle {
+                        break;
+                    }
+                    if t_settle.elapsed() >= max_settle {
+                        panic!("real-world timeline did not load audio waveform peaks");
+                    }
+                }
                 std::thread::sleep(Duration::from_millis(5));
             }
             let (mut upd, mut tess, mut rend, mut total) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
@@ -434,6 +480,7 @@ pub fn timeline(o: &Opts) -> Vec<Value> {
             eprintln!("timeline {view}: update p50 {:.2} ms, p95 {:.2} ms", pct(&upd, 0.5), pct(&upd, 0.95));
             rows.push(json!({
                 "view": view, "clips": clips, "frames": frames, "gpu": gpu,
+                "waveform_streams": waveform_streams, "waveform_buckets": waveform_buckets,
                 "update_p50_ms": pct(&upd, 0.5), "update_p95_ms": pct(&upd, 0.95),
                 "tess_p50_ms": pct(&tess, 0.5), "tess_p95_ms": pct(&tess, 0.95),
                 "render_p50_ms": pct(&rend, 0.5), "render_p95_ms": pct(&rend, 0.95),

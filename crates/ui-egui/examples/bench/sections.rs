@@ -423,7 +423,7 @@ pub fn timeline(o: &Opts) -> Vec<Value> {
             while t_settle.elapsed() < min_settle || (real_world && (waveform_streams == 0 || waveform_buckets == 0)) {
                 ui.frame();
                 if real_world {
-                    let peaks = ui.harness.state_mut().ui.timeline.peaks.lock().expect("waveform cache lock");
+                    let peaks = ui.harness.state_mut().tl.peaks.lock().expect("waveform cache lock");
                     waveform_streams = peaks.len();
                     waveform_buckets = peaks.values().map(|p| p.len()).sum();
                     if waveform_streams > 0 && waveform_buckets > 0 && t_settle.elapsed() >= min_settle {

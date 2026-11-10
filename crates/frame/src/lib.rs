@@ -551,6 +551,8 @@ impl VideoFrame {
                 let kg = 1.0 - kr - kb;
                 let (cr_r, cb_b) = (2.0 * (1.0 - kr), 2.0 * (1.0 - kb));
                 let (cr_g, cb_g) = (cr_r * kr / kg, cb_b * kb / kg);
+                // Large full-frame conversions have far more rows than workers; minimum row batches
+                // keep Rayon scheduling overhead down without changing any per-pixel arithmetic.
                 if n == 1 && alpha.is_none() && r.w * r.h >= YUV8_PAIR_TABLE_MIN_PIXELS {
                     // Full size and opaque (decoded video): R' depends on (Y', Cr) only and B' on
                     // (Y', Cb), so their decoded values are tabulated once for all 65 536 code
@@ -562,7 +564,7 @@ impl VideoFrame {
                     let rt = pair(&|yy, v| (0.0 + q(yy + cr_r * v) * 1.0) * inv);
                     let bt = pair(&|yy, u| (0.0 + q(yy + cb_b * u) * 1.0) * inv);
                     let opaque = (0.0f32 + 1.0) * inv;
-                    out.par_chunks_mut(r.w * 4).enumerate().for_each(|(ry, row)| {
+                    out.par_chunks_mut(r.w * 4).enumerate().with_min_len(8).for_each(|(ry, row)| {
                         let y = r.y + ry;
                         let chroma = chroma.row(y);
                         let Some(ys) = planes[0].get(y * w + r.x..y * w + r.x + r.w) else {
@@ -594,7 +596,7 @@ impl VideoFrame {
                         let start = at.saturating_mul(len);
                         p.get(start..start.saturating_add(len).min(p.len())).unwrap_or(&[])
                     }
-                    out.par_chunks_mut(r.w * 4).enumerate().for_each(|(ry, row)| {
+                    out.par_chunks_mut(r.w * 4).enumerate().with_min_len(8).for_each(|(ry, row)| {
                         let y = (r.y + ry).min(h - 1);
                         let chroma = chroma.row(y);
                         let yrow = line(&planes[0], y, w);
@@ -618,7 +620,7 @@ impl VideoFrame {
                     });
                     return;
                 }
-                out.par_chunks_mut(r.w * 4).enumerate().for_each(|(ry, row)| {
+                out.par_chunks_mut(r.w * 4).enumerate().with_min_len(8).for_each(|(ry, row)| {
                     let oy = r.y + ry;
                     for rx in 0..r.w {
                         let ox = r.x + rx;

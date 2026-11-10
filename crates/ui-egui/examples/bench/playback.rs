@@ -35,6 +35,11 @@ pub fn import(s: &mut Session, path: &Path) -> ItemId {
     ItemId(r["items"].as_array().and_then(|a| a.first()).and_then(Value::as_u64).unwrap_or_else(|| panic!("import {}: {r}", path.display())))
 }
 
+pub fn import_image_sequence(s: &mut Session, path: &Path) -> ItemId {
+    let r = s.execute("file.import", json!({ "paths": [path.to_string_lossy()], "imageSequence": true })).expect("image sequence import");
+    ItemId(r["items"].as_array().and_then(|a| a.first()).and_then(Value::as_u64).unwrap_or_else(|| panic!("import sequence {}: {r}", path.display())))
+}
+
 /// One clip per track from t = 0 (`layers[0]` on V1), with (scale %, position, rotation°,
 /// opacity %) Motion/Opacity settings per layer.
 pub fn build_sequence(s: &mut Session, w: u32, h: u32, layers: &[(ItemId, f64, Option<(f64, f64)>, f64, f64)], effects: &[&str], secs: f64) -> ItemId {
@@ -667,6 +672,16 @@ fn parse_args() -> Args {
 pub fn scenario_session(name: &str) -> Option<(Session, ItemId)> {
     let mut s = Session::default();
     let seq = match name {
+        "image-sequence" => {
+            let path = std::path::PathBuf::from(std::env::var_os("FILMCRAFT_SEQUENCE_MEDIA")?);
+            let item = import_image_sequence(&mut s, &path);
+            let (width, height, duration) = {
+                let media = s.project.item(item)?.as_media()?;
+                let video = media.info.video.as_ref()?;
+                (video.width, video.height, media.info.duration.seconds())
+            };
+            build_sequence(&mut s, width, height, &[(item, 100.0, None, 0.0, 100.0)], &[], duration)
+        }
         "h264-1080" | "seek-storm" => {
             let a = import(&mut s, &fixture("a1080.mp4")?);
             build_sequence(&mut s, 1920, 1080, &[(a, 100.0, None, 0.0, 100.0)], &[], 20.0)

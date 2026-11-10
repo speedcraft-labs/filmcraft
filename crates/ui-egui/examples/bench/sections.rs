@@ -185,6 +185,7 @@ pub fn playback(o: &Opts) -> Vec<Value> {
     let seconds = if o.quick { 4.0 } else { 8.0 };
     // (scenario, resolution, scale, draft decoding)
     let cases: &[(&str, &str, f32, bool)] = &[
+        ("image-sequence", "full", 1.0, false),
         ("h264-1080", "full", 1.0, false),
         ("stack3", "full", 1.0, false),
         ("stack3-blend", "full", 1.0, false),
@@ -248,7 +249,7 @@ pub fn playback(o: &Opts) -> Vec<Value> {
 pub fn scrub(o: &Opts) -> Vec<Value> {
     let (seeks, drags) = if o.quick { (8, 3) } else { (24, 8) };
     let mut rows = Vec::new();
-    for scenario in ["h264-1080", "h264-2160", "hevc-2160"].into_iter().filter(|s| o.wants(s)) {
+    for scenario in ["image-sequence", "h264-1080", "h264-2160", "hevc-2160"].into_iter().filter(|s| o.wants(s)) {
         let Some((s, seq)) = playback::scenario_session(scenario) else {
             eprintln!("scrub {scenario}: skipped (fixtures unavailable)");
             continue;
@@ -326,9 +327,11 @@ pub fn big_sequence(s: &mut Session, item: ItemId, name: &str, seed: u64) -> (It
 /// Eight contiguous cuts from one ordinary 1080p source, with its embedded soundtrack aligned
 /// underneath. The real-world #291 adapter sets `FILMCRAFT_TIMELINE_MEDIA` so timeline painting
 /// uses the same file as playback and export rather than the synthetic 1000-clip stress fixture.
-fn real_world_sequence(s: &mut Session, item: ItemId) -> (ItemId, usize) {
+fn real_world_sequence(s: &mut Session, item: ItemId, external_audio: Option<ItemId>) -> (ItemId, usize) {
     let media = s.project.item(item).and_then(|it| it.as_media()).expect("real-world timeline source is media");
-    assert!(!media.info.audio_streams.is_empty(), "real-world timeline source must carry audio");
+    let audio_item = external_audio.unwrap_or(item);
+    let audio_media = s.project.item(audio_item).and_then(|it| it.as_media()).expect("real-world timeline audio source is media");
+    assert!(!audio_media.info.audio_streams.is_empty(), "real-world timeline audio source must carry audio");
     let duration = media.info.duration;
     let (width, height) = media.info.video.as_ref().map(|v| (v.width, v.height)).unwrap_or((1920, 1080));
     let rate = FrameRate::FPS_23_976;
@@ -346,7 +349,7 @@ fn real_world_sequence(s: &mut Session, item: ItemId) -> (ItemId, usize) {
             let source_range = TimeRange::from_bounds(rate.tick_of(start_frame), rate.tick_of(end_frame));
             let position = source_range.start;
             let video = p.make_track_item(item, TrackKind::Video, position, source_range, rate).expect("video region");
-            let audio = p.make_track_item(item, TrackKind::Audio, position, source_range, rate).expect("audio region");
+            let audio = p.make_track_item(audio_item, TrackKind::Audio, position, source_range, rate).expect("audio region");
             video_regions.push(video);
             audio_regions.push(audio);
         }
@@ -405,8 +408,13 @@ pub fn timeline(o: &Opts) -> Vec<Value> {
     let mut rows = Vec::new();
     for _ in 0..o.repeat {
         let mut s = Session::default();
-        let item = playback::import(&mut s, &path);
-        let (_, clips) = if real_world { real_world_sequence(&mut s, item) } else { big_sequence(&mut s, item, "Timeline 1000", 7) };
+        let item = if real_world && std::env::var_os("FILMCRAFT_TIMELINE_IMAGE_SEQUENCE").is_some() {
+            playback::import_image_sequence(&mut s, &path)
+        } else {
+            playback::import(&mut s, &path)
+        };
+        let external_audio = std::env::var_os("FILMCRAFT_TIMELINE_AUDIO").map(std::path::PathBuf::from).map(|p| playback::import(&mut s, &p));
+        let (_, clips) = if real_world { real_world_sequence(&mut s, item, external_audio) } else { big_sequence(&mut s, item, "Timeline 1000", 7) };
         let (tx, rx) = std::sync::mpsc::channel();
         let app = filmcraft_ui_egui::FilmcraftApp::new(s).with_control(rx);
         let mut b = egui_kittest::Harness::builder().with_size(egui::vec2(1920.0, 1080.0)).with_max_steps(100_000);

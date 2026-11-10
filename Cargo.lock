@@ -1072,6 +1072,15 @@ version = "0.1.0"
 source = "git+https://github.com/speedcraft-labs/craft-libs?rev=f0507f3d4512dfc880388a4b9687e411a27e0b35#f0507f3d4512dfc880388a4b9687e411a27e0b35"
 
 [[package]]
+name = "craft-distortion"
+version = "0.1.0"
+source = "git+https://github.com/speedcraft-labs/craft-libs?rev=cd0f22bce74e85bedef7b963aacf23cd12f2642e#cd0f22bce74e85bedef7b963aacf23cd12f2642e"
+dependencies = [
+ "pulp",
+ "wide",
+]
+
+[[package]]
 name = "craft-docpath"
 version = "0.1.0"
 source = "git+https://github.com/speedcraft-labs/craft-libs?rev=6ce8f65177fe2e48e62166e8502aac19a44ca90e#6ce8f65177fe2e48e62166e8502aac19a44ca90e"
@@ -2282,6 +2291,7 @@ dependencies = [
 name = "filmcraft-h264enc"
 version = "0.17.0"
 dependencies = [
+ "craft-distortion",
  "filmcraft-bitstream",
  "filmcraft-testkit",
  "rayon",
@@ -5898,6 +5908,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "safe_arch"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42c6efa15875e6ecb39ca61fb0b0c1a40b84fac5a5ffe71eef7d1000c8eb3f5f"
+dependencies = [
+ "bytemuck",
+]
+
+[[package]]
 name = "safetensors"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7554,6 +7573,16 @@ dependencies = [
  "raw-window-handle",
  "static_assertions",
  "web-sys",
+]
+
+[[package]]
+name = "wide"
+version = "1.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d920ac99c3c8edce110cb8d07dbb324d6d026011dce85b1e9355b70f0adacc4f"
+dependencies = [
+ "bytemuck",
+ "safe_arch",
 ]
 
 [[package]]

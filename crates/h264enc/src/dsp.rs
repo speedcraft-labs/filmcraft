@@ -1,171 +1,27 @@
 //! Distortion metrics: SAD, SATD (4x4 Hadamard), SSD.
 
+use craft_distortion::{sad as craft_sad, sad8 as craft_sad8, sad16 as craft_sad16, satd as craft_satd};
+
 #[inline]
 pub fn sad(a: &[u8], sa: usize, b: &[u8], sb: usize, w: usize, h: usize) -> u32 {
-    let mut s = 0u32;
-    for r in 0..h {
-        let ra = &a[r * sa..r * sa + w];
-        let rb = &b[r * sb..r * sb + w];
-        s += ra.iter().zip(rb).map(|(&x, &y)| x.abs_diff(y) as u32).sum::<u32>();
-    }
-    s
+    craft_sad(a, sa, b, sb, w, h)
 }
 
 /// SAD of a 16-wide block (fast path).
 #[inline]
 pub fn sad16(a: &[u8], sa: usize, b: &[u8], sb: usize, h: usize) -> u32 {
-    sad_n::<16>(a, sa, b, sb, h)
+    craft_sad16(a, sa, b, sb, h)
 }
 
 /// SAD of an 8-wide block (fast path).
 #[inline]
 pub fn sad8(a: &[u8], sa: usize, b: &[u8], sb: usize, h: usize) -> u32 {
-    sad_n::<8>(a, sa, b, sb, h)
+    craft_sad8(a, sa, b, sb, h)
 }
 
-#[inline(always)]
-fn sad_n<const N: usize>(a: &[u8], sa: usize, b: &[u8], sb: usize, h: usize) -> u32 {
-    let mut s = 0u32;
-    for r in 0..h {
-        let (Some(ra), Some(rb)) = (a.get(r * sa..).and_then(|x| x.first_chunk::<N>()), b.get(r * sb..).and_then(|x| x.first_chunk::<N>())) else {
-            break;
-        };
-        let mut acc = 0u16;
-        for i in 0..N {
-            acc += ra[i].abs_diff(rb[i]) as u16;
-        }
-        s += acc as u32;
-    }
-    s
-}
-
-#[cfg(test)]
-fn hadamard4x4_sum(d: &[i32; 16]) -> u32 {
-    let mut t = [0i32; 16];
-    for i in 0..4 {
-        let a0 = d[i * 4] + d[i * 4 + 1];
-        let a1 = d[i * 4] - d[i * 4 + 1];
-        let a2 = d[i * 4 + 2] + d[i * 4 + 3];
-        let a3 = d[i * 4 + 2] - d[i * 4 + 3];
-        t[i * 4] = a0 + a2;
-        t[i * 4 + 1] = a1 + a3;
-        t[i * 4 + 2] = a0 - a2;
-        t[i * 4 + 3] = a1 - a3;
-    }
-    let mut s = 0u32;
-    for i in 0..4 {
-        let a0 = t[i] + t[4 + i];
-        let a1 = t[i] - t[4 + i];
-        let a2 = t[8 + i] + t[12 + i];
-        let a3 = t[8 + i] - t[12 + i];
-        s += (a0 + a2).unsigned_abs() + (a1 + a3).unsigned_abs() + (a0 - a2).unsigned_abs() + (a1 - a3).unsigned_abs();
-    }
-    s
-}
-
-/// SATD of a strip of `N` columns (N/4 side-by-side 4x4 blocks) and 4 rows, computed lane-wise so the compiler
-/// can vectorise it. Uses |p+q| + |p-q| = 2 max(|p|, |q|) for the last butterfly, which also absorbs the /2.
-#[inline(always)]
-fn satd_strip<const N: usize, const H: usize>(a: &[u8], sa: usize, b: &[u8], sb: usize) -> u32 {
-    let mut d = [[0i16; N]; 4];
-    for r in 0..4 {
-        let ra = &a[r * sa..r * sa + N];
-        let rb = &b[r * sb..r * sb + N];
-        for i in 0..N {
-            d[r][i] = ra[i] as i16 - rb[i] as i16;
-        }
-    }
-    let mut v = [[0i16; N]; 4];
-    for i in 0..N {
-        let s01 = d[0][i] + d[1][i];
-        let d01 = d[0][i] - d[1][i];
-        let s23 = d[2][i] + d[3][i];
-        let d23 = d[2][i] - d[3][i];
-        v[0][i] = s01 + s23;
-        v[1][i] = s01 - s23;
-        v[2][i] = d01 + d23;
-        v[3][i] = d01 - d23;
-    }
-    let mut total = 0u32;
-    for row in &v {
-        let mut hs = [0i16; H];
-        let mut hd = [0i16; H];
-        for k in 0..H {
-            hs[k] = row[2 * k] + row[2 * k + 1];
-            hd[k] = row[2 * k] - row[2 * k + 1];
-        }
-        for k in 0..H / 2 {
-            total += hs[2 * k].unsigned_abs().max(hs[2 * k + 1].unsigned_abs()) as u32;
-            total += hd[2 * k].unsigned_abs().max(hd[2 * k + 1].unsigned_abs()) as u32;
-        }
-    }
-    total
-}
-
-/// [`satd_strip`] for 8 and 4 columns, where its pairwise sums across neighbouring lanes do not
-/// vectorise: the same sums are formed lane by lane against copies of the rows shifted by one and
-/// two lanes, and only every fourth lane (the first column of a 4x4 block) is counted.
-#[inline(always)]
-fn satd_strip_narrow<const N: usize>(a: &[u8], sa: usize, b: &[u8], sb: usize) -> u32 {
-    let mut d = [[0i16; N]; 4];
-    for r in 0..4 {
-        let ra = &a[r * sa..r * sa + N];
-        let rb = &b[r * sb..r * sb + N];
-        for i in 0..N {
-            d[r][i] = ra[i] as i16 - rb[i] as i16;
-        }
-    }
-    let mut v = [[0i16; N]; 4];
-    for i in 0..N {
-        let s01 = d[0][i] + d[1][i];
-        let d01 = d[0][i] - d[1][i];
-        let s23 = d[2][i] + d[3][i];
-        let d23 = d[2][i] - d[3][i];
-        v[0][i] = s01 + s23;
-        v[1][i] = s01 - s23;
-        v[2][i] = d01 + d23;
-        v[3][i] = d01 - d23;
-    }
-    // per lane at most 4 rows x 2 x 2040: fits u16
-    let mut acc = [0u16; N];
-    for row in &v {
-        let mut p = [0i16; N];
-        let mut m = [0i16; N];
-        p[..N - 1].copy_from_slice(&row[1..]);
-        m[..N - 1].copy_from_slice(&row[1..]);
-        for i in 0..N {
-            p[i] += row[i];
-            m[i] = row[i] - m[i];
-        }
-        let mut p2 = [0i16; N];
-        let mut m2 = [0i16; N];
-        p2[..N - 2].copy_from_slice(&p[2..]);
-        m2[..N - 2].copy_from_slice(&m[2..]);
-        for i in 0..N {
-            let t = p[i].unsigned_abs().max(p2[i].unsigned_abs()) + m[i].unsigned_abs().max(m2[i].unsigned_abs());
-            acc[i] += if i % 4 == 0 { t } else { 0 };
-        }
-    }
-    acc.iter().map(|&x| x as u32).sum()
-}
-
-/// Sum of absolute 4x4 Hadamard-transformed differences (halved), for w, h multiples of 4.
+/// SATD of 4x4 Hadamard-transformed differences (halved), for w, h multiples of 4.
 pub fn satd(a: &[u8], sa: usize, b: &[u8], sb: usize, w: usize, h: usize) -> u32 {
-    let mut total = 0;
-    for by in (0..h).step_by(4) {
-        let (ao, bo) = (by * sa, by * sb);
-        match w {
-            16 => total += satd_strip::<16, 8>(&a[ao..], sa, &b[bo..], sb),
-            8 => total += satd_strip_narrow::<8>(&a[ao..], sa, &b[bo..], sb),
-            4 => total += satd_strip_narrow::<4>(&a[ao..], sa, &b[bo..], sb),
-            _ => {
-                for bx in (0..w).step_by(4) {
-                    total += satd_strip_narrow::<4>(&a[ao + bx..], sa, &b[bo + bx..], sb);
-                }
-            }
-        }
-    }
-    total
+    craft_satd(a, sa, b, sb, w, h)
 }
 
 pub fn ssd(a: &[u8], sa: usize, b: &[u8], sb: usize, w: usize, h: usize) -> u64 {
@@ -194,6 +50,29 @@ pub fn block_var(a: &[u8], sa: usize, w: usize, h: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hadamard4x4_sum(d: &[i32; 16]) -> u32 {
+        let mut t = [0i32; 16];
+        for i in 0..4 {
+            let a0 = d[i * 4] + d[i * 4 + 1];
+            let a1 = d[i * 4] - d[i * 4 + 1];
+            let a2 = d[i * 4 + 2] + d[i * 4 + 3];
+            let a3 = d[i * 4 + 2] - d[i * 4 + 3];
+            t[i * 4] = a0 + a2;
+            t[i * 4 + 1] = a1 + a3;
+            t[i * 4 + 2] = a0 - a2;
+            t[i * 4 + 3] = a1 - a3;
+        }
+        let mut sum = 0u32;
+        for i in 0..4 {
+            let a0 = t[i] + t[4 + i];
+            let a1 = t[i] - t[4 + i];
+            let a2 = t[8 + i] + t[12 + i];
+            let a3 = t[8 + i] - t[12 + i];
+            sum += (a0 + a2).unsigned_abs() + (a1 + a3).unsigned_abs() + (a0 - a2).unsigned_abs() + (a1 - a3).unsigned_abs();
+        }
+        sum
+    }
     #[test]
     fn satd_of_dc_difference() {
         let a = [10u8; 16];

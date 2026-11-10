@@ -77,6 +77,7 @@ proptest = "1"
 roxmltree = "0.21"
 craft-docpath = { version = "0.1.0", git = "https://github.com/speedcraft-labs/craft-libs", rev = "6ce8f65177fe2e48e62166e8502aac19a44ca90e" }
 craft-media = { version = "0.1.0", git = "https://github.com/speedcraft-labs/craft-libs", rev = "6ce8f65177fe2e48e62166e8502aac19a44ca90e", default-features = false }
+craft-distortion = { version = "0.1.0", git = "https://github.com/speedcraft-labs/craft-libs", rev = "cd0f22bce74e85bedef7b963aacf23cd12f2642e" }
 
 # ui
 # Shared frontend components; keep this dependency above the engine boundary.

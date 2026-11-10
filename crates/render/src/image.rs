@@ -243,6 +243,15 @@ const BATCH: usize = 64;
 /// [`filmcraft_color::linear_to_srgb_u8`], and [`alpha_u8`] for the alpha.
 pub(crate) fn over_black_row(s: &[f32], o: &mut [u8], alpha: bool) {
     let lut = filmcraft_color::linear_to_srgb_u8_table();
+    if !alpha {
+        for (src, dst) in s.as_chunks::<4>().0.iter().zip(o.as_chunks_mut::<4>().0) {
+            dst[0] = lut[filmcraft_color::linear_to_srgb_index(src[0]) as usize & 4095];
+            dst[1] = lut[filmcraft_color::linear_to_srgb_index(src[1]) as usize & 4095];
+            dst[2] = lut[filmcraft_color::linear_to_srgb_index(src[2]) as usize & 4095];
+            dst[3] = 255;
+        }
+        return;
+    }
     let mut ix = [0u16; BATCH * 4];
     for (s, o) in s.chunks(BATCH * 4).zip(o.chunks_mut(BATCH * 4)) {
         let ix = &mut ix[..s.len()];
@@ -253,7 +262,7 @@ pub(crate) fn over_black_row(s: &[f32], o: &mut [u8], alpha: bool) {
             o[0] = lut[i[0] as usize & 4095];
             o[1] = lut[i[1] as usize & 4095];
             o[2] = lut[i[2] as usize & 4095];
-            o[3] = if alpha { alpha_u8(s[3]) } else { 255 };
+            o[3] = alpha_u8(s[3]);
         }
     }
 }

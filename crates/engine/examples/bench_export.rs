@@ -99,23 +99,32 @@ fn ffmpeg_fixture(secs: u32) -> Option<PathBuf> {
     Some(path)
 }
 
-fn session(src: &Path) -> Session {
+fn session(src: &Path, secs: u32) -> Session {
     let mut s = Session::default();
-    let r = s.execute("file.import", json!({ "paths": [src.to_string_lossy()] })).expect("import");
+    let image_sequence = std::env::var_os("FILMCRAFT_EXPORT_IMAGE_SEQUENCE").is_some();
+    let r = s.execute("file.import", json!({ "paths": [src.to_string_lossy()], "imageSequence": image_sequence })).expect("import");
     let item = ItemId(r["items"].as_array().and_then(|a| a.first()).and_then(Value::as_u64).expect("imported item"));
+    let audio_item = std::env::var_os("FILMCRAFT_EXPORT_AUDIO")
+        .map(|path| {
+            let path = PathBuf::from(path);
+            let r = s.execute("file.import", json!({ "paths": [path.to_string_lossy()] })).expect("audio import");
+            ItemId(r["items"].as_array().and_then(|a| a.first()).and_then(Value::as_u64).expect("imported audio item"))
+        })
+        .unwrap_or(item);
     let info = s.project.item(item).and_then(|i| i.as_media()).map(|m| m.info.clone()).expect("media");
     let v = info.video.clone().expect("video stream");
     let rate = v.frame_rate;
     s.edit("bench", |p, st| {
         let settings = SequenceSettings { width: v.width, height: v.height, frame_rate: rate, ..SequenceSettings::default() };
         let seq = p.new_sequence("Bench", settings, 1, 1, None);
-        let d = p.item(item).map(|i| i.duration()).unwrap_or(Tick::ZERO);
+        let requested = rate.snap(Tick::from_seconds_f64(f64::from(secs)));
+        let d = p.item(item).map(|i| i.duration().min(requested)).unwrap_or(Tick::ZERO);
         let range = TimeRange::new(Tick::ZERO, d);
         let mut vi = p.make_track_item(item, TrackKind::Video, Tick::ZERO, range, rate).expect("video item");
         for e in &mut vi.effects {
             filmcraft_project::resolve_auto_points(e, (v.width, v.height), (v.width, v.height));
         }
-        let ai = p.make_track_item(item, TrackKind::Audio, Tick::ZERO, range, rate).expect("audio item");
+        let ai = p.make_track_item(audio_item, TrackKind::Audio, Tick::ZERO, range, rate).expect("audio item");
         let q = p.sequence_mut(seq).expect("sequence");
         q.video_tracks[0].items.push(vi);
         q.audio_tracks[0].items.push(ai);
@@ -140,7 +149,7 @@ fn main() {
     let dir = std::env::temp_dir().join(format!("filmcraft-bench-export-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let out = keep.clone().unwrap_or_else(|| dir.join(format!("out.{}", if format == "prores" { "mov" } else { "mp4" })));
-    let mut s = session(&src);
+    let mut s = session(&src, secs);
     let mut times = Vec::new();
     let mut stages = Vec::new();
     for i in 0..runs {

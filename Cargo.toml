@@ -11,6 +11,7 @@ rust-version = "1.95"
 repository = "https://github.com/storytold/filmcraft"
 
 [workspace.dependencies]
+allocation-counter = "0.8"
 craft-blur = { package = "craft-blur", git = "https://github.com/speedcraft-labs/craft-libs", rev = "f0507f3d4512dfc880388a4b9687e411a27e0b35" }
 craft-resample = { git = "https://github.com/speedcraft-labs/craft-libs", rev = "5b39be1932c66dc5d72064d9a0680a7e57ef388f", features = ["rayon"] }
 # internal

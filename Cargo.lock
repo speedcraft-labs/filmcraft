@@ -1059,6 +1059,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "craft-bitstream"
+version = "0.1.0"
+source = "git+https://github.com/speedcraft-labs/craft-libs?rev=6ce8f65177fe2e48e62166e8502aac19a44ca90e#6ce8f65177fe2e48e62166e8502aac19a44ca90e"
+dependencies = [
+ "craft-media 0.1.0 (git+https://github.com/speedcraft-labs/craft-libs?rev=6ce8f65177fe2e48e62166e8502aac19a44ca90e)",
+]
+
+[[package]]
+name = "craft-blur"
+version = "0.1.0"
+source = "git+https://github.com/speedcraft-labs/craft-libs?rev=f0507f3d4512dfc880388a4b9687e411a27e0b35#f0507f3d4512dfc880388a4b9687e411a27e0b35"
+
+[[package]]
 name = "craft-docpath"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=1b34eba41e62138fc2438d2734523b302840b45d#1b34eba41e62138fc2438d2734523b302840b45d"
@@ -1067,6 +1080,16 @@ source = "git+https://github.com/storytold/craft-libs?rev=1b34eba41e62138fc2438d
 name = "craft-fonts-build"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=1b34eba41e62138fc2438d2734523b302840b45d#1b34eba41e62138fc2438d2734523b302840b45d"
+
+[[package]]
+name = "craft-hevc"
+version = "0.1.0"
+source = "git+https://github.com/speedcraft-labs/craft-libs?rev=6ce8f65177fe2e48e62166e8502aac19a44ca90e#6ce8f65177fe2e48e62166e8502aac19a44ca90e"
+dependencies = [
+ "craft-bitstream",
+ "rayon",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "craft-i18n"
@@ -1097,6 +1120,22 @@ version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=1b34eba41e62138fc2438d2734523b302840b45d#1b34eba41e62138fc2438d2734523b302840b45d"
 dependencies = [
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "craft-media"
+version = "0.1.0"
+source = "git+https://github.com/speedcraft-labs/craft-libs?rev=6ce8f65177fe2e48e62166e8502aac19a44ca90e#6ce8f65177fe2e48e62166e8502aac19a44ca90e"
+dependencies = [
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "craft-resample"
+version = "0.1.0"
+source = "git+https://github.com/speedcraft-labs/craft-libs?rev=5b39be1932c66dc5d72064d9a0680a7e57ef388f#5b39be1932c66dc5d72064d9a0680a7e57ef388f"
+dependencies = [
+ "rayon",
 ]
 
 [[package]]
@@ -1992,7 +2031,7 @@ dependencies = [
 name = "filmcraft-bitstream"
 version = "0.17.0"
 dependencies = [
- "craft-media",
+ "craft-media 0.1.0 (git+https://github.com/storytold/craft-libs?rev=1b34eba41e62138fc2438d2734523b302840b45d)",
 ]
 
 [[package]]
@@ -2038,6 +2077,7 @@ dependencies = [
 name = "filmcraft-codecs"
 version = "0.17.0"
 dependencies = [
+ "craft-hevc",
  "filmcraft-aac",
  "filmcraft-ac3",
  "filmcraft-apv",
@@ -2048,7 +2088,6 @@ dependencies = [
  "filmcraft-dnx",
  "filmcraft-frame",
  "filmcraft-h264",
- "filmcraft-hevc",
  "filmcraft-isobmff",
  "filmcraft-matroska",
  "filmcraft-media",
@@ -2214,6 +2253,7 @@ version = "0.17.0"
 dependencies = [
  "filmcraft-color",
  "filmcraft-time",
+ "proptest",
  "rayon",
  "serde",
 ]
@@ -2283,16 +2323,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "filmcraft-hevc"
-version = "0.17.0"
-dependencies = [
- "filmcraft-bitstream",
- "filmcraft-testkit",
- "rayon",
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "filmcraft-interchange"
 version = "0.17.0"
 dependencies = [
@@ -2313,7 +2343,7 @@ dependencies = [
 name = "filmcraft-isobmff"
 version = "0.17.0"
 dependencies = [
- "craft-media",
+ "craft-media 0.1.0 (git+https://github.com/storytold/craft-libs?rev=1b34eba41e62138fc2438d2734523b302840b45d)",
  "filmcraft-testkit",
  "proptest",
  "serde_json",
@@ -2323,7 +2353,7 @@ dependencies = [
 name = "filmcraft-matroska"
 version = "0.17.0"
 dependencies = [
- "craft-media",
+ "craft-media 0.1.0 (git+https://github.com/storytold/craft-libs?rev=1b34eba41e62138fc2438d2734523b302840b45d)",
  "filmcraft-testkit",
  "serde_json",
 ]
@@ -2405,13 +2435,13 @@ dependencies = [
 name = "filmcraft-platform"
 version = "0.17.0"
 dependencies = [
+ "craft-hevc",
  "filmcraft-bitstream",
  "filmcraft-codecs",
  "filmcraft-color",
  "filmcraft-export",
  "filmcraft-frame",
  "filmcraft-h264",
- "filmcraft-hevc",
  "filmcraft-isobmff",
  "filmcraft-media",
  "filmcraft-project",
@@ -2456,6 +2486,8 @@ dependencies = [
 name = "filmcraft-render"
 version = "0.17.0"
 dependencies = [
+ "craft-blur",
+ "craft-resample",
  "filmcraft-audio-dsp",
  "filmcraft-captions",
  "filmcraft-color",

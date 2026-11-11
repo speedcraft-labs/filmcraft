@@ -1,20 +1,21 @@
 use super::{Frame, McBlock, Plane, RefPic, build_hpel};
 use crate::dsp::satd;
 use crate::mbinfo::Mv;
+use crate::pixel::Depth;
 
 const TAPS: [i32; 6] = [1, -5, 20, 20, -5, 1];
 
-fn sample(plane: &Plane, x: isize, y: isize) -> i32 {
+fn sample(plane: &Plane<u8>, x: isize, y: isize) -> i32 {
     let x = x.clamp(0, plane.w as isize - 1);
     let y = y.clamp(0, plane.h as isize - 1);
     i32::from(plane.data[plane.idx(x, y)])
 }
 
-fn horizontal(plane: &Plane, x: isize, y: isize) -> i32 {
+fn horizontal(plane: &Plane<u8>, x: isize, y: isize) -> i32 {
     TAPS.iter().enumerate().map(|(offset, tap)| tap * sample(plane, x + offset as isize - 2, y)).sum()
 }
 
-fn interpolate(plane: &Plane, x: isize, y: isize, fx: i16, fy: i16) -> u8 {
+fn interpolate(plane: &Plane<u8>, x: isize, y: isize, fx: i16, fy: i16) -> u8 {
     let full = |dx, dy| sample(plane, x + dx, y + dy);
     let half_h = |dy| ((horizontal(plane, x, y + dy) + 16) >> 5).clamp(0, 255);
     let half_v = |dx| {
@@ -85,7 +86,7 @@ fn cached_plane_costs_match_per_candidate_interpolation() {
                 }
             }
             frame.y.extend_edges();
-            let hpel = build_hpel(&frame.y, reuse.take());
+            let hpel = build_hpel(&frame.y, Depth::default(), reuse.take());
             let reference = RefPic { frame, hpel, mbs: Vec::new(), poc: 0, id: 0 };
             let edge_x = width as isize;
             let edge_y = height as isize;
@@ -165,7 +166,7 @@ fn benchmark_cached_plane_costs() {
         *byte = random(&mut seed);
     }
     frame.y.extend_edges();
-    let hpel = build_hpel(&frame.y, None);
+    let hpel = build_hpel(&frame.y, Depth::default(), None);
     let reference = RefPic { frame, hpel, mbs: Vec::new(), poc: 0, id: 0 };
     let source: [u8; 256] = std::array::from_fn(|_| random(&mut seed));
     for (width, height) in [(8, 8), (8, 16), (16, 8), (16, 16)] {

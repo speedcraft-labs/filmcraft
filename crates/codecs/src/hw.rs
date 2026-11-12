@@ -273,7 +273,7 @@ impl NalStreamInfo {
             interlaced: !sps.frame_mbs_only,
             profile_idc: sps.profile_idc,
             color: filmcraft_color::ColorInfo {
-                chroma_siting: filmcraft_color::ChromaSiting::from_h26x(vui.chroma_loc.map_or(0, |location| location.0)).unwrap_or_default(),
+                chroma_siting: filmcraft_color::ChromaSiting::default(),
                 ..vui_color(crop.2, crop.3, vui.colour_primaries, vui.matrix_coefficients, vui.transfer_characteristics, vui.full_range)
             },
             par: sar_par(vui.sar),
@@ -322,7 +322,7 @@ impl NalStreamInfo {
             interlaced: false,
             profile_idc: sps.ptl.profile_idc,
             color: filmcraft_color::ColorInfo {
-                chroma_siting: filmcraft_color::ChromaSiting::from_h26x(vui.chroma_loc.map_or(0, |location| location.0)).unwrap_or_default(),
+                chroma_siting: filmcraft_color::ChromaSiting::default(),
                 ..vui_color(crop.2, crop.3, vui.colour_primaries, vui.matrix_coefficients, vui.transfer_characteristics, vui.full_range)
             },
             par: sar_par(vui.sar),

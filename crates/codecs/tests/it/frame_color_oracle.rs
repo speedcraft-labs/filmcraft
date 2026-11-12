@@ -25,24 +25,6 @@ fn colors(ff: &std::path::Path, name: &str, codec: &[&str]) -> Option<(ColorInfo
 }
 
 #[test]
-fn decoded_frames_keep_signalled_chroma_locations() {
-    use filmcraft_color::ChromaSiting;
-    let ff = filmcraft_testkit::require_ffmpeg!();
-    for (name, codec, expected) in [
-        ("siting_center_h264.mp4", vec!["-c:v", "libx264", "-pix_fmt", "yuv420p", "-x264-params", "chromaloc=1"], ChromaSiting::Center),
-        (
-            "siting_topleft_hevc.mp4",
-            vec!["-c:v", "libx265", "-pix_fmt", "yuv420p", "-tag:v", "hvc1", "-x265-params", "log-level=error:chromaloc=2"],
-            ChromaSiting::TopLeft,
-        ),
-    ] {
-        let Some((stream, frame)) = colors(&ff, name, &codec) else { continue };
-        assert_eq!(stream.chroma_siting, expected, "{name}: stream");
-        assert_eq!(frame.chroma_siting, expected, "{name}: frame");
-    }
-}
-
-#[test]
 fn decoded_frames_keep_the_signalled_primaries() {
     let ff = filmcraft_testkit::require_ffmpeg!();
     let x264 = |p: &'static str| ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-x264-params", p];

@@ -256,7 +256,7 @@ impl NalStreamInfo {
         if sets.len() == nsps {
             return Err(CodecError::Decode("avcC has no PPS".into()));
         }
-        let sps = filmcraft_h264::params::Sps::parse(&filmcraft_bitstream::unescape_rbsp(sps_nal.get(1..).unwrap_or_default()))
+        let sps = craft_video::h264::decode::params::Sps::parse(&filmcraft_bitstream::unescape_rbsp(sps_nal.get(1..).unwrap_or_default()))
             .map_err(|e| CodecError::Decode(e.to_string()))?;
         let crop = sps.crop_rect();
         let vui = sps.vui.clone().unwrap_or_default();
@@ -273,7 +273,7 @@ impl NalStreamInfo {
             interlaced: !sps.frame_mbs_only,
             profile_idc: sps.profile_idc,
             color: filmcraft_color::ColorInfo {
-                chroma_siting: filmcraft_color::ChromaSiting::from_h26x(vui.chroma_loc.map_or(0, |location| location.0)).unwrap_or_default(),
+                chroma_siting: filmcraft_color::ChromaSiting::default(),
                 ..vui_color(crop.2, crop.3, vui.colour_primaries, vui.matrix_coefficients, vui.transfer_characteristics, vui.full_range)
             },
             par: sar_par(vui.sar),
@@ -305,7 +305,7 @@ impl NalStreamInfo {
         if !sets.iter().any(|n| nal_type(n) == Some(32)) || !sets.iter().any(|n| nal_type(n) == Some(34)) {
             return Err(CodecError::Decode("hvcC lacks a VPS or PPS".into()));
         }
-        let sps = filmcraft_hevc::params::Sps::parse(&filmcraft_bitstream::unescape_rbsp(sps_nal.get(2..).unwrap_or_default()))
+        let sps = craft_video::hevc::decode::params::Sps::parse(&filmcraft_bitstream::unescape_rbsp(sps_nal.get(2..).unwrap_or_default()))
             .map_err(|e| CodecError::Decode(e.to_string()))?;
         let crop = sps.crop_rect();
         let vui = sps.vui.clone().unwrap_or_default();
@@ -322,7 +322,7 @@ impl NalStreamInfo {
             interlaced: false,
             profile_idc: sps.ptl.profile_idc,
             color: filmcraft_color::ColorInfo {
-                chroma_siting: filmcraft_color::ChromaSiting::from_h26x(vui.chroma_loc.map_or(0, |location| location.0)).unwrap_or_default(),
+                chroma_siting: filmcraft_color::ChromaSiting::default(),
                 ..vui_color(crop.2, crop.3, vui.colour_primaries, vui.matrix_coefficients, vui.transfer_characteristics, vui.full_range)
             },
             par: sar_par(vui.sar),

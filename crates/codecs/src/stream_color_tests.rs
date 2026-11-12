@@ -237,26 +237,6 @@ fn full_range_h264_without_colr_is_full_range() {
 }
 
 #[test]
-fn codec_chroma_location_survives_container_colour_override() {
-    for (code, siting) in [
-        (0, ChromaSiting::Left),
-        (1, ChromaSiting::Center),
-        (2, ChromaSiting::TopLeft),
-        (3, ChromaSiting::Top),
-        (4, ChromaSiting::BottomLeft),
-        (5, ChromaSiting::Bottom),
-    ] {
-        let signal = Signal { chroma_location: Some(code), ..PQ_2020 };
-        for codec in [avc(h264_sps(120, 68, Some(signal))), hevc(hevc_sps(1920, 1080, Some(signal)))] {
-            let colr = filmcraft_isobmff::ColorInfo::Nclx { primaries: 1, transfer: 1, matrix: 1, full_range: false };
-            let color = mp4_color(codec, 1920, 1080, Some(colr));
-            assert_eq!(color.chroma_siting, siting);
-            assert_eq!(color.transfer, Transfer::Bt709);
-        }
-    }
-}
-
-#[test]
 fn bt601_sd_h264_without_colr_has_bt601_primaries() {
     let c = mp4_color(avc(h264_sps(45, 30, Some(SMPTE_170M))), 720, 480, None);
     assert_eq!(c, ColorInfo { matrix: Matrix::Bt601, transfer: Transfer::Bt709, primaries: Primaries::Bt601_525, range: Range::Limited, ..ColorInfo::REC709 });

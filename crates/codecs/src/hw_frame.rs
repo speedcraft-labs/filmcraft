@@ -50,7 +50,6 @@ pub struct FrameStreamInfo {
     /// VP9: transfer and primaries from the container (not in the bitstream).
     transfer: Option<Transfer>,
     primaries: Option<Primaries>,
-    chroma_siting: filmcraft_color::ChromaSiting,
 }
 
 /// The OBUs of a low-overhead AV1 sample: `(type, payload)`, stopping at the first malformed one.
@@ -85,8 +84,8 @@ pub(crate) fn obus(data: &[u8]) -> Vec<(u8, &[u8])> {
 
 /// What an AV1 sequence header fixes about the pictures: profile, maximum size and the colour
 /// configuration (bit depth, chroma format, colour description). `None` when it does not parse.
-fn av1_format(seq: &[u8]) -> Option<(u8, u32, u32, filmcraft_av1::ColorConfig)> {
-    let h = filmcraft_av1::SequenceHeader::parse(seq).ok()?;
+fn av1_format(seq: &[u8]) -> Option<(u8, u32, u32, craft_video::av1::decode::ColorConfig)> {
+    let h = craft_video::av1::decode::SequenceHeader::parse(seq).ok()?;
     Some((h.profile, h.max_frame_width, h.max_frame_height, h.color))
 }
 
@@ -161,7 +160,6 @@ impl FrameStreamInfo {
                     color: None,
                     transfer: Transfer::from_code(c.transfer_characteristics),
                     primaries: primaries_from_code(c.colour_primaries),
-                    chroma_siting: filmcraft_color::ChromaSiting::from_vp9(c.chroma_subsampling).unwrap_or_default(),
                 }))
             }
             CodecConfig::Av1(c) => Some(Self::from_av1(c, size)),
@@ -172,15 +170,13 @@ impl FrameStreamInfo {
     fn from_av1(c: &filmcraft_isobmff::Av1Config, entry_size: (u32, u32)) -> Result<Self> {
         let seq =
             obus(&c.config_obus).into_iter().find(|(t, _)| *t == 1).map(|(_, p)| p).ok_or_else(|| CodecError::Decode("av1C has no sequence header".into()))?;
-        let h = filmcraft_av1::SequenceHeader::parse(seq).map_err(|e| CodecError::Decode(e.to_string()))?;
+        let h = craft_video::av1::decode::SequenceHeader::parse(seq).map_err(|e| CodecError::Decode(e.to_string()))?;
         let size = (h.max_frame_width, h.max_frame_height);
         if entry_size != (0, 0) && entry_size != size {
             // the sample entry and the sequence header disagree: leave the stream to our decoder
             return Err(CodecError::Decode(format!("sample entry says {}x{}, the sequence header {}x{}", entry_size.0, entry_size.1, size.0, size.1)));
         }
         let cc = &h.color;
-        let mut color = av1_color(size.0, size.1, cc.matrix_coefficients, cc.transfer_characteristics, cc.color_primaries, cc.color_range);
-        color.chroma_siting = filmcraft_color::ChromaSiting::from_av1(cc.chroma_sample_position).unwrap_or_default();
         Ok(Self {
             codec: FrameCodec::Av1,
             profile: h.profile,
@@ -190,10 +186,9 @@ impl FrameStreamInfo {
             size,
             config_obus: c.config_obus.clone(),
             sequence_header: Some(seq.to_vec()),
-            color: Some(color),
+            color: Some(av1_color(size.0, size.1, cc.matrix_coefficients, cc.transfer_characteristics, cc.color_primaries, cc.color_range)),
             transfer: None,
             primaries: None,
-            chroma_siting: color.chroma_siting,
         })
     }
 
@@ -217,7 +212,6 @@ impl FrameStreamInfo {
             color: None,
             transfer: None,
             primaries: None,
-            chroma_siting: Default::default(),
         }
     }
 
@@ -225,8 +219,8 @@ impl FrameStreamInfo {
     /// frame is a shown key frame): the software decoders' own test.
     pub fn is_random_access(&self, sample: &[u8]) -> bool {
         match self.codec {
-            FrameCodec::Vp9 => filmcraft_vp9::is_keyframe(sample),
-            FrameCodec::Av1 => filmcraft_av1::is_key_frame_unit(sample),
+            FrameCodec::Vp9 => craft_video::vp9::decode::is_keyframe(sample),
+            FrameCodec::Av1 => craft_video::av1::decode::is_key_frame_unit(sample),
         }
     }
 
@@ -235,9 +229,8 @@ impl FrameStreamInfo {
     pub fn picture_params(&self, sample: &[u8]) -> Option<PictureParams> {
         match self.codec {
             FrameCodec::Vp9 => {
-                let k = filmcraft_vp9::keyframe_info(sample)?;
-                let mut color = vp9_color(k.width, k.height, k.color.color_space, k.color.full_range, self.transfer, self.primaries);
-                color.chroma_siting = self.chroma_siting;
+                let k = craft_video::vp9::decode::keyframe_info(sample)?;
+                let color = vp9_color(k.width, k.height, k.color.color_space, k.color.full_range, self.transfer, self.primaries);
                 Some(PictureParams {
                     size: (k.width, k.height),
                     bit_depth: k.bit_depth,
@@ -247,11 +240,10 @@ impl FrameStreamInfo {
             }
             FrameCodec::Av1 => {
                 let seq = obus(sample).into_iter().find(|(t, _)| *t == 1).map(|(_, p)| p)?;
-                let h = filmcraft_av1::SequenceHeader::parse(seq).ok()?;
+                let h = craft_video::av1::decode::SequenceHeader::parse(seq).ok()?;
                 let cc = &h.color;
                 let size = (h.max_frame_width, h.max_frame_height);
-                let mut color = av1_color(size.0, size.1, cc.matrix_coefficients, cc.transfer_characteristics, cc.color_primaries, cc.color_range);
-                color.chroma_siting = filmcraft_color::ChromaSiting::from_av1(cc.chroma_sample_position).unwrap_or_default();
+                let color = av1_color(size.0, size.1, cc.matrix_coefficients, cc.transfer_characteristics, cc.color_primaries, cc.color_range);
                 Some(PictureParams { size, bit_depth: u32::from(cc.bit_depth), subsampling: (cc.subsampling_x, cc.subsampling_y), color })
             }
         }

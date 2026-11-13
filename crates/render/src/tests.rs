@@ -99,6 +99,25 @@ fn identity_transform_preserves_the_image_exactly() {
 }
 
 #[test]
+fn horizontal_transform_matches_bilinear_sampling_exactly() {
+    let img = Image { w: 8, h: 3, px: (0..96).map(|v| (v as f32 * 0.137).sin()).collect() };
+    let (w, h) = (9, img.h);
+    let matrix = filmcraft_geom::Affine::scale(9.0 / 8.0, 1.0);
+    let inverse = matrix.inverse().unwrap();
+    let actual = img.transformed(w, h, &matrix);
+    let mut expected = vec![0.0; w * h * 4];
+    for y in 0..h {
+        for x in 0..w {
+            let u = (inverse.a * (x as f64 + 0.5) + inverse.e) as f32;
+            let v = (inverse.d * (y as f64 + 0.5) + inverse.f) as f32;
+            let sample = img.sample_bilinear(u, v);
+            expected[(y * w + x) * 4..(y * w + x + 1) * 4].copy_from_slice(&sample);
+        }
+    }
+    assert_eq!(actual.px, expected);
+}
+
+#[test]
 fn bilinear_interior_fast_path_matches_transparent_border_sampling() {
     let img = Image { w: 3, h: 2, px: (0..24).map(|v| v as f32 / 23.0).collect() };
     for y in [0.0_f32, 0.5, 1.0, 1.5, 2.5] {

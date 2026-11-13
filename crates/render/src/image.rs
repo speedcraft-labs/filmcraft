@@ -73,10 +73,31 @@ impl Image {
         let tx = fx - x0;
         let ty = fy - y0;
         let (x0, y0) = (x0 as isize, y0 as isize);
-        let a = self.get_or_clear(x0, y0);
-        let b = self.get_or_clear(x0 + 1, y0);
-        let c = self.get_or_clear(x0, y0 + 1);
-        let d = self.get_or_clear(x0 + 1, y0 + 1);
+        let (a, b, c, d) = if x0 >= 0 && y0 >= 0 && x0 + 1 < self.w as isize && y0 + 1 < self.h as isize {
+            // Most transformed pixels are interior samples. Read the four neighbours from two
+            // contiguous spans instead of bounds-checking each tap separately.
+            let x0 = x0 as usize;
+            let y0 = y0 as usize;
+            let i = (y0 * self.w + x0) * 4;
+            let next_row = self.w * 4;
+            let top = self.px.get(i..i + 8).and_then(|slice| <[f32; 8]>::try_from(slice).ok());
+            let bottom = self.px.get(i + next_row..i + next_row + 8).and_then(|slice| <[f32; 8]>::try_from(slice).ok());
+            match (top, bottom) {
+                (Some(top), Some(bottom)) => {
+                    let [a0, a1, a2, a3, b0, b1, b2, b3] = top;
+                    let [c0, c1, c2, c3, d0, d1, d2, d3] = bottom;
+                    ([a0, a1, a2, a3], [b0, b1, b2, b3], [c0, c1, c2, c3], [d0, d1, d2, d3])
+                }
+                _ => (
+                    self.get_or_clear(x0 as isize, y0 as isize),
+                    self.get_or_clear(x0 as isize + 1, y0 as isize),
+                    self.get_or_clear(x0 as isize, y0 as isize + 1),
+                    self.get_or_clear(x0 as isize + 1, y0 as isize + 1),
+                ),
+            }
+        } else {
+            (self.get_or_clear(x0, y0), self.get_or_clear(x0 + 1, y0), self.get_or_clear(x0, y0 + 1), self.get_or_clear(x0 + 1, y0 + 1))
+        };
         let mut o = [0.0; 4];
         for k in 0..4 {
             let top = a[k] + (b[k] - a[k]) * tx;
@@ -110,6 +131,9 @@ impl Image {
     pub fn transformed(&self, w: usize, h: usize, m: &Affine) -> Image {
         if self.w == 0 || self.h == 0 || w == 0 || h == 0 {
             return Image::new(w, h);
+        }
+        if w == self.w && h == self.h && *m == Affine::IDENTITY {
+            return self.clone();
         }
         let Some(inv) = m.inverse() else { return Image::new(w, h) };
         // minification factor

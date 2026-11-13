@@ -99,6 +99,29 @@ fn identity_transform_preserves_the_image_exactly() {
 }
 
 #[test]
+fn bilinear_interior_fast_path_matches_transparent_border_sampling() {
+    let img = Image { w: 3, h: 2, px: (0..24).map(|v| v as f32 / 23.0).collect() };
+    for y in [0.0_f32, 0.5, 1.0, 1.5, 2.5] {
+        for x in [0.0_f32, 0.5, 1.0, 1.25, 2.5, 3.5] {
+            let fx = x - 0.5;
+            let fy = y - 0.5;
+            let x0 = fx.floor() as isize;
+            let y0 = fy.floor() as isize;
+            let tx = fx - fx.floor();
+            let ty = fy - fy.floor();
+            let (a, b, c, d) = (img.get_or_clear(x0, y0), img.get_or_clear(x0 + 1, y0), img.get_or_clear(x0, y0 + 1), img.get_or_clear(x0 + 1, y0 + 1));
+            let mut expected = [0.0; 4];
+            for k in 0..4 {
+                let top = a[k] + (b[k] - a[k]) * tx;
+                let bottom = c[k] + (d[k] - c[k]) * tx;
+                expected[k] = top + (bottom - top) * ty;
+            }
+            assert_eq!(img.sample_bilinear(x, y), expected, "sample at ({x}, {y})");
+        }
+    }
+}
+
+#[test]
 fn motion_scale_and_position() {
     let (mut p, red, _o, seq, map) = setup();
     let id = place(&mut p, seq, 0, red, 0, 48);

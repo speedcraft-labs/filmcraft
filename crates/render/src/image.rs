@@ -111,6 +111,9 @@ impl Image {
         if self.w == 0 || self.h == 0 || w == 0 || h == 0 {
             return Image::new(w, h);
         }
+        if w == self.w && h == self.h && *m == Affine::IDENTITY {
+            return self.clone();
+        }
         let Some(inv) = m.inverse() else { return Image::new(w, h) };
         // minification factor
         let sx = (m.a * m.a + m.b * m.b).sqrt();

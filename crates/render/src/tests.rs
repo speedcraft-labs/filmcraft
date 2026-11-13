@@ -93,6 +93,12 @@ fn over_black_with_alpha_keeps_the_color_and_the_alpha() {
 }
 
 #[test]
+fn identity_transform_preserves_the_image_exactly() {
+    let img = Image { w: 2, h: 2, px: vec![0.0, 0.5, 1.0, 1.0, 0.25, 0.125, 0.75, 0.5, 1.0, 0.0, 0.25, 1.0, 0.1, 0.2, 0.3, 0.4] };
+    assert_eq!(img.transformed(img.w, img.h, &filmcraft_geom::Affine::IDENTITY), img);
+}
+
+#[test]
 fn motion_scale_and_position() {
     let (mut p, red, _o, seq, map) = setup();
     let id = place(&mut p, seq, 0, red, 0, 48);

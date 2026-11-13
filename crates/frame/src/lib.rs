@@ -23,6 +23,40 @@ use serde::{Deserialize, Serialize};
 /// (two tables of 65 536 values): below it the tables cost more than they save.
 const YUV8_PAIR_TABLE_MIN_PIXELS: usize = 1 << 18;
 
+struct Yuv8PairTables {
+    red: Vec<f32>,
+    blue: Vec<f32>,
+}
+
+fn yuv8_pair_tables(info: ColorInfo) -> &'static Yuv8PairTables {
+    static TABLES: [OnceLock<Yuv8PairTables>; 30] = [const { OnceLock::new() }; 30];
+    let matrix = match info.matrix {
+        Matrix::Bt601 => 0,
+        Matrix::Bt709 => 1,
+        Matrix::Bt2020Ncl => 2,
+    };
+    let transfer = match info.transfer {
+        filmcraft_color::Transfer::Bt709 => 0,
+        filmcraft_color::Transfer::Srgb => 1,
+        filmcraft_color::Transfer::Linear => 2,
+        filmcraft_color::Transfer::Pq => 3,
+        filmcraft_color::Transfer::Hlg => 4,
+    };
+    let index = (matrix * 2 + usize::from(info.range == Range::Full)) * 5 + transfer;
+    TABLES[index].get_or_init(|| {
+        let lin: Vec<f32> = (0..4096).map(|i| to_linear(i as f32 / 4095.0, info.transfer)).collect();
+        let at = |v: f32| (v.clamp(0.0, 1.0) * 4095.0 + 0.5) as usize;
+        let ytab: Vec<f32> = (0..256).map(|v| normalize_y(v, 8, info.range)).collect();
+        let ctab: Vec<f32> = (0..256).map(|v| normalize_c(v, 8, info.range)).collect();
+        let (kr, kb) = info.matrix.kr_kb();
+        let (cr_r, cb_b) = (2.0 * (1.0 - kr), 2.0 * (1.0 - kb));
+        let pair = |f: &(dyn Fn(f32, f32) -> f32 + Sync)| -> Vec<f32> {
+            (0..1usize << 16).into_par_iter().map(|i| (0.0 + lin[at(f(ytab[i >> 8], ctab[i & 255]))] * 1.0) * 1.0).collect()
+        };
+        Yuv8PairTables { red: pair(&|yy, v| yy + cr_r * v), blue: pair(&|yy, u| yy + cb_b * u) }
+    })
+}
+
 struct Rgb8Tables {
     y: [i32; 256],
     red_v: [i32; 256],
@@ -389,7 +423,7 @@ impl VideoFrame {
     pub fn to_opaque_srgb8_with_filter(&self, n: usize, filter: ChromaFilter) -> Option<Vec<u8>> {
         let PixelData::Yuv8 { planes, chroma, alpha: None } = &self.data else { return None };
         let (w, h) = (self.width as usize, self.height as usize);
-        let chroma = ChromaUpsampler::new([&planes[1], &planes[2]], (w, h), *chroma, self.color.chroma_siting, filter)?;
+        let chroma = ChromaUpsampler::new([&planes[1], &planes[2]], (w, h), *chroma, self.color.chroma_siting, filter)?.with_horizontal_cache();
         if planes[0].len() < w * h {
             return None;
         }
@@ -537,7 +571,9 @@ impl VideoFrame {
                 });
             }
             PixelData::Yuv8 { planes, chroma, alpha } => {
-                let Some(chroma) = ChromaUpsampler::new([&planes[1], &planes[2]], (w, h), *chroma, info.chroma_siting, filter) else {
+                let Some(chroma) =
+                    ChromaUpsampler::new([&planes[1], &planes[2]], (w, h), *chroma, info.chroma_siting, filter).map(|c| c.with_horizontal_cache())
+                else {
                     out.fill(0.0);
                     return;
                 };
@@ -553,32 +589,40 @@ impl VideoFrame {
                 let (cr_g, cb_g) = (cr_r * kr / kg, cb_b * kb / kg);
                 if n == 1 && alpha.is_none() && r.w * r.h >= YUV8_PAIR_TABLE_MIN_PIXELS {
                     // Full size and opaque (decoded video): R' depends on (Y', Cr) only and B' on
-                    // (Y', Cb), so their decoded values are tabulated once for all 65 536 code
-                    // pairs, with the very expressions the per-pixel loop below evaluates; G' is
-                    // decoded per pixel. Each value is the loop's `(0 + q * 1) * inv` exactly.
+                    // (Y', Cb), so their decoded values are tabulated for all 65 536 code pairs;
+                    // G' is decoded per pixel. Cache those tables when no color-managed curve is
+                    // supplied, since their values depend only on the frame's color description.
                     let pair = |f: &(dyn Fn(f32, f32) -> f32 + Sync)| -> Vec<f32> {
-                        (0..1usize << 16).into_par_iter().map(|i| f(ytab[i >> 8], ctab[i & 255])).collect()
+                        (0..1usize << 16).into_par_iter().map(|i| (0.0 + q(f(ytab[i >> 8], ctab[i & 255])) * 1.0) * inv).collect()
                     };
-                    let rt = pair(&|yy, v| (0.0 + q(yy + cr_r * v) * 1.0) * inv);
-                    let bt = pair(&|yy, u| (0.0 + q(yy + cb_b * u) * 1.0) * inv);
                     let opaque = (0.0f32 + 1.0) * inv;
-                    out.par_chunks_mut(r.w * 4).enumerate().for_each(|(ry, row)| {
-                        let y = r.y + ry;
-                        let chroma = chroma.row(y);
-                        let Some(ys) = planes[0].get(y * w + r.x..y * w + r.x + r.w) else {
-                            row.fill(0.0);
-                            return;
-                        };
-                        for (rx, (o, &yc)) in row.as_chunks_mut::<4>().0.iter_mut().zip(ys).enumerate() {
-                            let [uc, vc] = chroma.sample(r.x + rx).map(|code| code as usize);
-                            let yc = usize::from(yc);
-                            let (yy, u, v) = (ytab[yc], ctab[uc], ctab[vc]);
-                            o[0] = rt[yc << 8 | vc];
-                            o[1] = (0.0 + q(yy - cr_g * v - cb_g * u) * 1.0) * inv;
-                            o[2] = bt[yc << 8 | uc];
-                            o[3] = opaque;
-                        }
-                    });
+                    let mut write = |rt: &[f32], bt: &[f32]| {
+                        out.par_chunks_mut(r.w * 4).enumerate().for_each(|(ry, row)| {
+                            let y = r.y + ry;
+                            let chroma = chroma.row(y);
+                            let Some(ys) = planes[0].get(y * w + r.x..y * w + r.x + r.w) else {
+                                row.fill(0.0);
+                                return;
+                            };
+                            for (rx, (o, &yc)) in row.as_chunks_mut::<4>().0.iter_mut().zip(ys).enumerate() {
+                                let [uc, vc] = chroma.sample(r.x + rx).map(|code| code as usize);
+                                let yc = usize::from(yc);
+                                let (yy, u, v) = (ytab[yc], ctab[uc], ctab[vc]);
+                                o[0] = rt[yc << 8 | vc];
+                                o[1] = (0.0 + q(yy - cr_g * v - cb_g * u) * 1.0) * inv;
+                                o[2] = bt[yc << 8 | uc];
+                                o[3] = opaque;
+                            }
+                        });
+                    };
+                    if decode.is_none() {
+                        let tables = yuv8_pair_tables(info);
+                        write(&tables.red, &tables.blue);
+                    } else {
+                        let rt = pair(&|yy, v| yy + cr_r * v);
+                        let bt = pair(&|yy, u| yy + cb_b * u);
+                        write(&rt, &bt);
+                    }
                     return;
                 }
                 if n == 1 {

@@ -238,22 +238,26 @@ impl Image {
 const BATCH: usize = 64;
 
 /// One row of [`Image::over_black_rgba8`] (`alpha` false: the fourth byte is 255) or
-/// [`Image::over_black_with_alpha_rgba8`]. A batch's table indices are computed first, in a loop
-/// that vectorises, and looked up after; per value this is
-/// [`filmcraft_color::linear_to_srgb_u8`], and [`alpha_u8`] for the alpha.
+/// [`Image::over_black_with_alpha_rgba8`]. A batch's RGB table indices are computed first and
+/// looked up after. Alpha is converted directly when retained; opaque exports skip its unused
+/// sRGB index and lookup.
 pub(crate) fn over_black_row(s: &[f32], o: &mut [u8], alpha: bool) {
     let lut = filmcraft_color::linear_to_srgb_u8_table();
-    let mut ix = [0u16; BATCH * 4];
+    let mut ix = [0u16; BATCH * 3];
     for (s, o) in s.chunks(BATCH * 4).zip(o.chunks_mut(BATCH * 4)) {
-        let ix = &mut ix[..s.len()];
-        for (i, v) in ix.iter_mut().zip(s) {
-            *i = filmcraft_color::linear_to_srgb_index(*v);
+        let src = s.as_chunks::<4>().0;
+        let dst = o.as_chunks_mut::<4>().0;
+        let ix = &mut ix[..src.len() * 3];
+        for (i, p) in ix.chunks_exact_mut(3).zip(src) {
+            i[0] = filmcraft_color::linear_to_srgb_index(p[0]);
+            i[1] = filmcraft_color::linear_to_srgb_index(p[1]);
+            i[2] = filmcraft_color::linear_to_srgb_index(p[2]);
         }
-        for ((o, i), s) in o.as_chunks_mut::<4>().0.iter_mut().zip(ix.as_chunks::<4>().0).zip(s.as_chunks::<4>().0) {
-            o[0] = lut[i[0] as usize & 4095];
-            o[1] = lut[i[1] as usize & 4095];
-            o[2] = lut[i[2] as usize & 4095];
-            o[3] = if alpha { alpha_u8(s[3]) } else { 255 };
+        for ((dst, i), p) in dst.iter_mut().zip(ix.chunks_exact(3)).zip(src) {
+            dst[0] = lut[i[0] as usize & 4095];
+            dst[1] = lut[i[1] as usize & 4095];
+            dst[2] = lut[i[2] as usize & 4095];
+            dst[3] = if alpha { alpha_u8(p[3]) } else { 255 };
         }
     }
 }

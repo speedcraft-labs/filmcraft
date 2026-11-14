@@ -131,6 +131,39 @@ impl Image {
         let x0 = (b.x.floor().max(0.0) as usize).min(w);
         let x1 = (b.right().ceil().max(0.0) as usize).min(w);
         let axis_aligned = m.b == 0.0 && m.c == 0.0;
+        // SAR correction changes only x, so each destination row samples the corresponding source row.
+        if axis_aligned && inv.d == 1.0 && inv.f == 0.0 {
+            let xs: Vec<Option<(isize, f32)>> = (x0..x1)
+                .map(|x| {
+                    let u = inv.a * (x as f64 + 0.5) + inv.e;
+                    if u < -1.0 || u > self.w as f64 + 1.0 {
+                        return None;
+                    }
+                    let fx = (u as f32) - 0.5;
+                    let x0 = fx.floor();
+                    Some((x0 as isize, fx - x0))
+                })
+                .collect();
+            out.px.par_chunks_mut(w * 4).enumerate().skip(y0).take(y1.saturating_sub(y0)).for_each(|(y, row)| {
+                for (x, tap) in (x0..x1).zip(&xs) {
+                    if let Some((sx, tx)) = tap {
+                        let (a, b) = if *sx >= 0 && *sx + 1 < self.w as isize {
+                            let i = (y * self.w + *sx as usize) * 4;
+                            match self.px.get(i..i + 8).and_then(|slice| <[f32; 8]>::try_from(slice).ok()) {
+                                Some([a0, a1, a2, a3, b0, b1, b2, b3]) => ([a0, a1, a2, a3], [b0, b1, b2, b3]),
+                                _ => (self.get_or_clear(*sx, y as isize), self.get_or_clear(*sx + 1, y as isize)),
+                            }
+                        } else {
+                            (self.get_or_clear(*sx, y as isize), self.get_or_clear(*sx + 1, y as isize))
+                        };
+                        for k in 0..4 {
+                            row[x * 4 + k] = a[k] + (b[k] - a[k]) * tx;
+                        }
+                    }
+                }
+            });
+            return out;
+        }
         out.px.par_chunks_mut(w * 4).enumerate().skip(y0).take(y1.saturating_sub(y0)).for_each(|(y, row)| {
             let py = y as f64 + 0.5;
             for x in x0..x1 {

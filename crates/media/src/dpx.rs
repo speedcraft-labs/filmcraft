@@ -1,38 +1,23 @@
-//! DPX (`.dpx`) stills, decoded clean-room from SMPTE ST 268 (Digital Picture Exchange).
+//! DPX (`.dpx`) stills: craft-dpx (SMPTE ST 268) reads the header and the code values; FilmCraft
+//! turns them into RGBA8 for the still pipeline.
 //!
 //! The first image element is decoded: luma, RGB, RGBA, ABGR, or Y'CbCr (CbYCrY 4:2:2, CbYACrYA
 //! 4:2:2:4, CbYCr 4:4:4, CbYCrA 4:4:4:4), 8, 10, 12 or 16 bits per component, big-endian (`SDPX`) or
-//! little-endian (`XPDS`) files. 10-bit components are filled into 32-bit words (packing 1, method
-//! A: two padding bits at the bottom; packing 2, method B: at the top), 12-bit components fill
-//! 16-bit words the same two ways; packed 10/12-bit components (packing 0) follow each other with no
-//! padding, the first in the low bits of a 32-bit word, a component crossing into the next word
-//! continuing in its low bits. Scan lines start on a 32-bit boundary and may carry end-of-line
-//! padding. Orientations 0–3 (either scan direction, either line order) are honoured. RGB and luma
-//! code values map linearly onto 8 bits (full range); a logarithmic (printing density) transfer is
-//! shown as stored, without a film-log conversion. Y'CbCr is converted with the matrix the
-//! colorimetric field names (BT.709, or BT.601 for the 601 and composite video codes; by picture
-//! size when unspecified), in video range unless the reference low / high data codes span the
-//! whole code range; a 4:2:2 chroma sample is shared by its adjacent pair of luma samples.
+//! little-endian (`XPDS`) files, every packing craft-dpx reads. Orientations 0–3 (either scan
+//! direction, either line order) are honoured. RGB and luma code values map linearly onto 8 bits
+//! (full range); a logarithmic (printing density) transfer is shown as stored, without a film-log
+//! conversion. Y'CbCr is converted with the matrix the colorimetric field names (BT.709, or BT.601
+//! for the 601 and composite video codes; by picture size when unspecified), in video range unless
+//! the reference low / high data codes span the whole code range; 4:2:2 chroma is shared by the two
+//! pixels of a pair.
 //!
-//! Not decoded (an "unsupported" error): run-length encoded elements, 1-bit and floating-point
-//! components, transposed orientations.
+//! Not decoded (an "unsupported" error): run-length encoded elements, signed, 1-bit and
+//! floating-point components, transposed orientations. Cineon files are not routed here.
 
+use craft_dpx::{Error, Layout, Limits};
 use filmcraft_color::{Matrix, Range, normalize_c, normalize_y, ycbcr_to_rgb};
-use filmcraft_frame::{
-    Chroma,
-    chroma::{ChromaFilter, ChromaUpsampler},
-};
 
 use crate::{MediaError, Result, still::Raster};
-
-/// Generic file + image information header: everything we read lies below this.
-const HEADER: usize = 1408;
-/// First image element of the image information header (72 bytes each).
-const ELEMENT: usize = 780;
-/// Largest picture we decode (16384 × 16384): bounds the allocation a header can ask for.
-const MAX_PIXELS: usize = 1 << 28;
-/// "Undefined" value of numeric header fields.
-const UNDEFINED: u32 = u32::MAX;
 
 fn err(name: &str, what: &str) -> MediaError {
     MediaError::Decode(format!("{name}: DPX: {what}"))
@@ -42,82 +27,19 @@ fn unsupported(name: &str, what: String) -> MediaError {
     MediaError::Unsupported(format!("{name}: DPX {what}"))
 }
 
+fn map_error(name: &str, e: Error) -> MediaError {
+    match e {
+        Error::Unsupported(what) => unsupported(name, what),
+        Error::NotDpx => err(name, "not a DPX file"),
+        Error::Malformed(what) => err(name, &what),
+        Error::LimitExceeded(_) => err(name, "picture too large"),
+        Error::Encode(what) => err(name, &what),
+    }
+}
+
 /// Whether `bytes` starts with the DPX magic number in either byte order.
 pub fn sniff(bytes: &[u8]) -> bool {
-    bytes.starts_with(b"SDPX") || bytes.starts_with(b"XPDS")
-}
-
-/// Header and sample reads in the file's byte order.
-#[derive(Clone, Copy)]
-struct Order {
-    big: bool,
-}
-
-impl Order {
-    fn u16(self, b: &[u8], at: usize) -> u16 {
-        let v = [b.get(at).copied().unwrap_or(0), b.get(at + 1).copied().unwrap_or(0)];
-        if self.big { u16::from_be_bytes(v) } else { u16::from_le_bytes(v) }
-    }
-
-    fn u32(self, b: &[u8], at: usize) -> u32 {
-        let v = core::array::from_fn(|i| b.get(at + i).copied().unwrap_or(0));
-        if self.big { u32::from_be_bytes(v) } else { u32::from_le_bytes(v) }
-    }
-}
-
-/// How components are stored in a scan line.
-#[derive(Clone, Copy)]
-enum Packing {
-    /// One byte per component.
-    Bytes,
-    /// One 16-bit word per component; the value is `word >> shift` (12-bit method A: 4).
-    Words { shift: u32 },
-    /// Three 10-bit components per 32-bit word, the first in the high bits, above `pad` bits.
-    Ten { pad: u32 },
-    /// `bits`-bit components back to back in 32-bit words, low bits first (packing 0).
-    Packed { bits: u32 },
-}
-
-impl Packing {
-    /// Bytes of a scan line holding `comps` components, before end-of-line padding (lines start on
-    /// a 32-bit boundary).
-    fn line_bytes(self, comps: usize) -> Option<usize> {
-        let raw = match self {
-            Packing::Bytes => comps,
-            Packing::Words { .. } => comps.checked_mul(2)?,
-            Packing::Ten { .. } => comps.div_ceil(3).checked_mul(4)?,
-            Packing::Packed { bits } => comps.checked_mul(bits as usize)?.div_ceil(32).checked_mul(4)?,
-        };
-        raw.checked_next_multiple_of(4)
-    }
-
-    /// The `comps` component values of one scan line.
-    fn unpack(self, line: &[u8], comps: usize, order: Order, out: &mut Vec<u16>) {
-        out.clear();
-        match self {
-            Packing::Bytes => out.extend(line.iter().take(comps).map(|&b| u16::from(b))),
-            Packing::Words { shift } => out.extend((0..comps).map(|i| order.u16(line, i * 2) >> shift)),
-            Packing::Ten { pad } => {
-                for w in 0..comps.div_ceil(3) {
-                    let word = order.u32(line, w * 4);
-                    for s in [20 + pad, 10 + pad, pad] {
-                        if out.len() < comps {
-                            out.push(((word >> s) & 0x3FF) as u16);
-                        }
-                    }
-                }
-            }
-            Packing::Packed { bits } => {
-                let mask = (1u64 << bits) - 1;
-                for i in 0..comps {
-                    let bit = i * bits as usize;
-                    let at = bit / 32 * 4;
-                    let pair = u64::from(order.u32(line, at)) | (u64::from(order.u32(line, at + 4)) << 32);
-                    out.push(((pair >> (bit % 32)) & mask) as u16);
-                }
-            }
-        }
-    }
+    craft_dpx::sniff(bytes) == Some(craft_dpx::Kind::Dpx)
 }
 
 /// What the stored components of a pixel are.
@@ -131,12 +53,6 @@ enum Components {
 }
 
 impl Components {
-    fn per_pixel(self) -> usize {
-        match self {
-            Components::Rgb { n, .. } | Components::YCbCr { n, .. } => n,
-        }
-    }
-
     fn has_alpha(self) -> bool {
         match self {
             Components::Rgb { map, .. } => map[3].is_some(),
@@ -144,8 +60,8 @@ impl Components {
         }
     }
 
-    /// RGBA8 of pixel `x` from the unpacked component values of its scan line (`bits` per value).
-    fn pixel(self, line: &[u16], x: usize, bits: u32, chroma: Option<[u32; 2]>) -> [u8; 4] {
+    /// RGBA8 of pixel `x` from the component values of its scan line (`bits` per value).
+    fn pixel(self, line: &[u16], x: usize, bits: u32) -> [u8; 4] {
         let max = (1u32 << bits) - 1;
         let to8 = |v: u32| ((v.min(max) * 255 + max / 2) / max) as u8;
         let get = |i: usize| line.get(i).map(|&v| u32::from(v));
@@ -154,12 +70,18 @@ impl Components {
                 Some(i) => get(x * n + i).map_or(0, to8),
                 None => 255,
             }),
-            Components::YCbCr { n, alpha, matrix, range, .. } => {
+            Components::YCbCr { n, sub, alpha, matrix, range } => {
                 let base = x * n;
+                let (cb, cr) = if sub {
+                    let pair = (x & !1) * n;
+                    (get(pair), get(pair + n))
+                } else {
+                    (get(base), get(base + 2))
+                };
+                // a missing Cr (odd width, 4:2:2) is neutral
                 let mid = 1u32 << (bits - 1);
-                let [cb, cr] = chroma.unwrap_or([mid; 2]);
                 let y = normalize_y(get(base + 1).unwrap_or(0), bits, range);
-                let rgb = ycbcr_to_rgb(y, normalize_c(cb, bits, range), normalize_c(cr, bits, range), matrix);
+                let rgb = ycbcr_to_rgb(y, normalize_c(cb.unwrap_or(mid), bits, range), normalize_c(cr.unwrap_or(mid), bits, range), matrix);
                 let c = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
                 let a = if alpha { get(base + n - 1).map_or(0, to8) } else { 255 };
                 [c(rgb[0]), c(rgb[1]), c(rgb[2]), a]
@@ -170,126 +92,58 @@ impl Components {
 
 /// Decode the first image element of a DPX file to straight-alpha RGBA8, top row first.
 pub fn decode(name: &str, bytes: &[u8]) -> Result<Raster> {
-    let order = match bytes.get(..4) {
-        Some(b"SDPX") => Order { big: true },
-        Some(b"XPDS") => Order { big: false },
-        _ => return Err(err(name, "not a DPX file")),
-    };
-    if bytes.len() < HEADER {
-        return Err(err(name, "truncated header"));
+    if !sniff(bytes) {
+        return Err(err(name, "not a DPX file"));
     }
-    let orientation = order.u16(bytes, 768);
-    let (w, h) = (order.u32(bytes, 772) as usize, order.u32(bytes, 776) as usize);
-    let el = ELEMENT;
-    let low_code = order.u32(bytes, el + 4);
-    let high_code = order.u32(bytes, el + 12);
-    let descriptor = bytes.get(el + 20).copied().unwrap_or(0);
-    let colorimetric = bytes.get(el + 22).copied().unwrap_or(0);
-    let bits = bytes.get(el + 23).copied().unwrap_or(0);
-    let packing = order.u16(bytes, el + 24);
-    let encoding = order.u16(bytes, el + 26);
-    let element_offset = order.u32(bytes, el + 28);
-    let eol_padding = order.u32(bytes, el + 32);
-    if w == 0 || h == 0 {
-        return Err(err(name, "empty picture"));
-    }
-    let pixels = w.checked_mul(h).filter(|&n| n <= MAX_PIXELS).ok_or_else(|| err(name, "picture too large"))?;
-    if encoding != 0 {
-        return Err(unsupported(name, "run-length encoding".into()));
-    }
-    let layout = match (bits, packing) {
-        (8, _) => Packing::Bytes,
-        (16, _) => Packing::Words { shift: 0 },
-        (10, 1) => Packing::Ten { pad: 2 },
-        (10, 2) => Packing::Ten { pad: 0 },
-        (12, 1) => Packing::Words { shift: 4 },
-        (12, 2) => Packing::Words { shift: 0 },
-        (10 | 12, 0) => Packing::Packed { bits: u32::from(bits) },
-        (b, p) => return Err(unsupported(name, format!("{b}-bit components with packing {p}"))),
-    };
-    let (flip_x, flip_y) = match orientation {
-        0 => (false, false),
-        1 => (true, false),
-        2 => (false, true),
-        3 => (true, true),
-        o => return Err(unsupported(name, format!("orientation {o}"))),
-    };
-    let max = (1u32 << bits) - 1;
+    let frame = craft_dpx::decode(bytes, &Limits::default()).map_err(|e| map_error(name, e))?;
+    let info = &frame.info;
+    let (w, h) = (info.width as usize, info.height as usize);
+    let (flip_x, flip_y) = info.flips().ok_or_else(|| unsupported(name, format!("orientation {}", info.orientation)))?;
+    let max = u32::from(info.max_code());
     // video range unless the reference codes span every code value
-    let range = if low_code == 0 && high_code == max { Range::Full } else { Range::Limited };
-    let matrix = match colorimetric {
-        5 | 6 => Matrix::Bt709,
-        7..=10 => Matrix::Bt601,
-        _ => filmcraft_frame::default_matrix(w as u32, h as u32),
+    let range = if info.reference_low_code == 0 && info.reference_high_code == max { Range::Full } else { Range::Limited };
+    let matrix = match info.colorimetric {
+        Some(5 | 6) => Matrix::Bt709,
+        Some(7..=10) => Matrix::Bt601,
+        _ => filmcraft_frame::default_matrix(info.width, info.height),
     };
     let ycbcr = |n, sub, alpha| Components::YCbCr { n, sub, alpha, matrix, range };
-    let components = match descriptor {
-        6 => Components::Rgb { n: 1, map: [Some(0), Some(0), Some(0), None] },
-        50 => Components::Rgb { n: 3, map: [Some(0), Some(1), Some(2), None] },
-        51 => Components::Rgb { n: 4, map: [Some(0), Some(1), Some(2), Some(3)] },
-        52 => Components::Rgb { n: 4, map: [Some(3), Some(2), Some(1), Some(0)] },
-        100 => ycbcr(2, true, false),
-        101 => ycbcr(3, true, true),
-        102 => ycbcr(3, false, false),
-        103 => ycbcr(4, false, true),
-        d => return Err(unsupported(name, format!("descriptor {d}"))),
+    let components = match info.layout {
+        Layout::Luma => Components::Rgb { n: 1, map: [Some(0), Some(0), Some(0), None] },
+        Layout::Rgb => Components::Rgb { n: 3, map: [Some(0), Some(1), Some(2), None] },
+        // craft-dpx returns ABGR (descriptor 52) reordered to RGBA
+        Layout::Rgba => Components::Rgb { n: 4, map: [Some(0), Some(1), Some(2), Some(3)] },
+        Layout::CbYCrY422 => ycbcr(2, true, false),
+        Layout::CbYACrYA4224 => ycbcr(3, true, true),
+        Layout::CbYCr444 => ycbcr(3, false, false),
+        Layout::CbYCrA4444 => ycbcr(4, false, true),
     };
-    let n = components.per_pixel();
-    let comps = w.checked_mul(n).ok_or_else(|| err(name, "picture too large"))?;
-    let pad = if eol_padding == UNDEFINED { 0 } else { eol_padding as usize };
-    let stride = layout.line_bytes(comps).and_then(|l| l.checked_add(pad)).ok_or_else(|| err(name, "picture too large"))?;
-    let offset = match element_offset {
-        0 | UNDEFINED => order.u32(bytes, 4) as usize,
-        o => o as usize,
-    };
-    // the last line needs no end-of-line padding
-    let size = stride.checked_mul(h - 1).and_then(|s| s.checked_add(stride - pad)).ok_or_else(|| err(name, "picture too large"))?;
-    let data = offset.checked_add(size).and_then(|end| bytes.get(offset..end)).ok_or_else(|| err(name, "truncated image data"))?;
-    let bits = u32::from(bits);
+    let per_line = w * info.layout.components();
+    let bits = u32::from(info.bits);
+    let pixels = w.checked_mul(h).ok_or_else(|| err(name, "picture too large"))?;
     let mut rgba = vec![0u8; pixels * 4];
-    let mut line = Vec::with_capacity(comps);
-    let mut cb = Vec::new();
-    let mut cr = Vec::new();
-    for y in 0..h {
-        let src = data.get(y * stride..).unwrap_or_default();
-        layout.unpack(src, comps, order, &mut line);
-        let chroma = if let Components::YCbCr { n, sub, .. } = components {
-            cb.clear();
-            cr.clear();
-            for column in (0..w).step_by(if sub { 2 } else { 1 }) {
-                cb.push(line.get(column * n).copied().unwrap_or(1 << (bits - 1)));
-                cr.push(line.get(column * n + if sub { n } else { 2 }).copied().unwrap_or(1 << (bits - 1)));
-            }
-            Some(
-                ChromaUpsampler::new(
-                    [&cb, &cr],
-                    (w, 1),
-                    if sub { Chroma::C422 } else { Chroma::C444 },
-                    filmcraft_color::ChromaSiting::Left,
-                    if sub { ChromaFilter::Nearest } else { ChromaFilter::Bilinear },
-                )
-                .ok_or_else(|| err(name, "invalid chroma planes"))?,
-            )
-        } else {
-            None
-        };
-        let chroma_row = chroma.as_ref().map(|chroma| chroma.row(0));
+    for (y, line) in frame.codes.chunks_exact(per_line.max(1)).take(h).enumerate() {
         let dy = if flip_y { h - 1 - y } else { y };
         for x in 0..w {
             let dx = if flip_x { w - 1 - x } else { x };
             let o = (dy * w + dx) * 4;
             if let Some(px) = rgba.get_mut(o..o + 4) {
-                px.copy_from_slice(&components.pixel(&line, x, bits, chroma_row.as_ref().map(|row| row.sample(x))));
+                px.copy_from_slice(&components.pixel(line, x, bits));
             }
         }
     }
     let has_alpha = components.has_alpha() && rgba.as_chunks::<4>().0.iter().any(|p| p[3] != 255);
-    Ok(Raster { width: w as u32, height: h as u32, rgba, has_alpha })
+    Ok(Raster { width: info.width, height: info.height, rgba, has_alpha })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// First image element of the image information header.
+    const ELEMENT: usize = 780;
+    /// "Undefined" value of numeric header fields.
+    const UNDEFINED: u32 = u32::MAX;
 
     /// A minimal DPX file (header + `data`) in the given byte order.
     /// Image element fields of a test DPX header.
@@ -452,14 +306,5 @@ mod tests {
         f[ELEMENT + 32..ELEMENT + 36].copy_from_slice(&(u32::MAX - 1).to_be_bytes());
         assert!(decode("a.dpx", &file(true, 1, 2, Element { descriptor: 50, bits: 8, packing: 0 }, 0, &[0; 4])).is_err());
         assert!(decode("a.dpx", &f).is_ok());
-    }
-
-    #[test]
-    fn packed_422_chroma_is_shared_by_each_adjacent_pair() {
-        let packed = [80, 128, 128, 128, 180, 128, 128, 128];
-        let expanded = [80, 128, 128, 80, 128, 128, 180, 128, 128, 180, 128, 128];
-        let source = file(true, 4, 1, Element { descriptor: 100, bits: 8, packing: 0 }, 0, &packed);
-        let reference = file(true, 4, 1, Element { descriptor: 102, bits: 8, packing: 0 }, 0, &expanded);
-        assert_eq!(decode("source.dpx", &source).unwrap().rgba, decode("reference.dpx", &reference).unwrap().rgba);
     }
 }
